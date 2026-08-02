@@ -52,6 +52,14 @@ with st.sidebar:
         st.caption(f"{'🔹' if s in (FRM, TO) else '▫️'} {s}"
                    + ("　←參考座標系" if s == META.get("reference_snapshot") else ""))
     st.divider()
+    st.header("分類維度")
+    DIMS = get("/dimensions")
+    DIM = st.radio("依什麼切分", [d["key"] for d in DIMS], index=1,
+                   help="兩套分類量的是不同東西，切換看看結論穩不穩。")
+    _d = next(d for d in DIMS if d["key"] == DIM)
+    st.caption(f"來源：{_d['source']}\n\n⚠️ {_d['caveat']}")
+
+    st.divider()
     st.caption(
         f"分群 `{META.get('cluster_method')}`\n\n"
         f"參考群集 {META.get('n_reference_clusters')} 個，"
@@ -90,24 +98,26 @@ with tabs[0]:
                 )
         st.caption("月薪中位數只涵蓋能換算成月薪的職缺；面議與論件計酬沒有可比數字，不計入。")
 
-    st.subheader("產業佔比隨時間")
-    ind = df("/industry-series")
+    st.subheader(f"{DIM}佔比隨時間")
+    ind = df("/industry-series", dimension=DIM)
     if not ind.empty:
-        fig = px.line(ind, x="snapshot_date", y="share", color="industry_bucket",
-                      markers=True, labels={"share": "佔比", "snapshot_date": ""})
+        fig = px.line(ind, x="snapshot_date", y="share", color="category",
+                      markers=True, labels={"share": "佔比", "snapshot_date": "",
+                                            "category": DIM})
         # 快照是離散事件，不是連續時間軸；不鎖成類別軸，Plotly 會把日期字串
         # 當時間戳解析並在兩點之間生出無意義的毫秒刻度。
         fig.update_xaxes(type="category")
         fig.update_layout(height=520, yaxis_tickformat=".1%", legend_title=None)
         st.plotly_chart(fig, use_container_width=True)
 
-    surv = df("/survival", from_snapshot=FRM, to_snapshot=TO)
+    surv = df("/survival", from_snapshot=FRM, to_snapshot=TO, dimension=DIM)
     if not surv.empty:
-        st.subheader(f"產業汰換率（{FRM} → {TO}）")
+        st.subheader(f"{DIM}汰換率（{FRM} → {TO}）")
         st.caption("汰換率＝前期職缺到後期已經不在的比例；更新率＝後期裡屬於新出現的比例。")
         s = surv.sort_values("churn_rate")
-        fig = px.bar(s, x="churn_rate", y="industry_bucket", orientation="h",
-                     text=s.churn_rate.map("{:.0%}".format), labels={"churn_rate": "汰換率"})
+        fig = px.bar(s, x="churn_rate", y="category", orientation="h",
+                     text=s.churn_rate.map("{:.0%}".format),
+                     labels={"churn_rate": "汰換率", "category": DIM})
         fig.update_layout(height=640, yaxis_title=None, xaxis_tickformat=".0%")
         st.plotly_chart(fig, use_container_width=True)
         st.dataframe(surv, use_container_width=True, hide_index=True)
@@ -202,24 +212,24 @@ with tabs[2]:
 
 # ── 產業組成 ───────────────────────────────────────────────────────
 with tabs[3]:
-    st.caption("每個產業的職缺分散到哪些語意群集，以及兩期之間這個分布怎麼重組。")
-    comp = df("/industry-composition", min_n=20)
+    st.caption(f"每個{DIM}的職缺分散到哪些語意群集，以及兩期之間這個分布怎麼重組。")
+    comp = df("/industry-composition", min_n=20, dimension=DIM)
     if comp.empty:
         st.warning("flow_industry_cluster 是空的。")
     else:
         comp["label"] = comp.label.fillna("未命名")
         a = comp[comp.snapshot_date == FRM].pivot_table(
-            index="industry_bucket", columns="label", values="share_in_industry",
+            index="category", columns="label", values="share_in_category",
             aggfunc="sum", fill_value=0)
         b = comp[comp.snapshot_date == TO].pivot_table(
-            index="industry_bucket", columns="label", values="share_in_industry",
+            index="category", columns="label", values="share_in_category",
             aggfunc="sum", fill_value=0)
         idx = a.index.union(b.index)
         col = a.columns.union(b.columns)
         delta = (b.reindex(index=idx, columns=col).fillna(0)
                  - a.reindex(index=idx, columns=col).fillna(0))
         keep = delta.abs().max().nlargest(30).index
-        st.subheader("產業內部組成的變化（百分點）")
+        st.subheader(f"{DIM}內部組成的變化（百分點）")
         fig = px.imshow(delta[keep] * 100, color_continuous_scale="RdBu",
                         color_continuous_midpoint=0, aspect="auto",
                         labels={"color": "百分點"})
@@ -228,12 +238,12 @@ with tabs[3]:
 
         snap = st.radio("Sankey 快照", SNAPS, horizontal=True, index=len(SNAPS) - 1)
         s = comp[comp.snapshot_date == snap].nlargest(60, "n")
-        nodes = list(dict.fromkeys([f"◀ {x}" for x in s.industry_bucket]
+        nodes = list(dict.fromkeys([f"◀ {x}" for x in s.category]
                                    + [f"{x} ▶" for x in s.label]))
         nidx = {n: i for i, n in enumerate(nodes)}
         fig = go.Figure(go.Sankey(
             node={"label": nodes, "pad": 12, "thickness": 14},
-            link={"source": [nidx[f"◀ {x}"] for x in s.industry_bucket],
+            link={"source": [nidx[f"◀ {x}"] for x in s.category],
                   "target": [nidx[f"{x} ▶"] for x in s.label],
                   "value": s.n.tolist()}))
         fig.update_layout(height=800, font_size=11)
@@ -255,7 +265,7 @@ with tabs[4]:
         fig.update_layout(height=300)
         st.plotly_chart(fig, use_container_width=True)
         st.dataframe(
-            cs[["company_name", "industry_bucket", "n_from", "n_to",
+            cs[["company_name", "industry_class", "bucket_label", "n_from", "n_to",
                 "shift_score", "from_label", "to_label"]],
             use_container_width=True, hide_index=True, height=520,
             column_config={"shift_score": st.column_config.ProgressColumn(

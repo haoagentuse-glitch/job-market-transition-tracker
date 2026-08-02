@@ -87,13 +87,36 @@ def timeline():
     """)
 
 
+DIMENSIONS = {"職務類別": "bucket_label", "行業大類": "industry_class"}
+
+
+@app.get("/dimensions")
+def dimensions():
+    """兩套分類維度。職務類別來自爬蟲的職務代碼桶（跨類別推薦職缺會被貼錯標籤，
+    保留是為了跟舊快照可比）；行業大類由公司行業名對照 A–S 標準分類而來，較乾淨。"""
+    return [
+        {"key": "職務類別", "column": "bucket_label", "source": "爬蟲的 jobPositions 代碼桶",
+         "caveat": "推薦職缺會被貼上發出請求的桶標籤，本身有誤差"},
+        {"key": "行業大類", "column": "industry_class", "source": "公司行業名 → A–S 標準分類",
+         "caveat": "反映公司所屬產業，不是這個職缺在做什麼"},
+    ]
+
+
+def dim_col(dimension: str | None) -> str:
+    col = DIMENSIONS.get(dimension or "行業大類")
+    if col is None:
+        raise HTTPException(400, f"未知的 dimension：{dimension}；可用：{list(DIMENSIONS)}")
+    return col
+
+
 @app.get("/industry-series")
-def industry_series():
-    return q("""
-        WITH t AS (SELECT snapshot_date, industry_bucket, count(*) n FROM jobs GROUP BY 1,2)
-        SELECT industry_bucket, snapshot_date, n,
+def industry_series(dimension: str = "行業大類"):
+    col = dim_col(dimension)
+    return q(f"""
+        WITH t AS (SELECT snapshot_date, {col} AS category, count(*) n FROM jobs GROUP BY 1,2)
+        SELECT category, snapshot_date, n,
                n::DOUBLE / sum(n) OVER (PARTITION BY snapshot_date) AS share
-        FROM t ORDER BY industry_bucket, snapshot_date
+        FROM t ORDER BY category, snapshot_date
     """)
 
 
@@ -151,7 +174,7 @@ def cluster_jobs(cluster_id: int, snapshot: str | None = None,
                  limit: int = Query(50, le=500)):
     sql = """
         SELECT j.snapshot_date, j.job_id, j.job_title, j.company_name,
-               j.industry_bucket, j.city_name, j.salary_desc, j.job_url, c.sim
+               j.bucket_label, j.industry_class, j.city_name, j.salary_desc, j.job_url, c.sim
         FROM job_cluster c
         JOIN jobs j ON j.job_id = c.job_id AND j.snapshot_date = c.snapshot_date
         WHERE c.cluster_id = ?
@@ -194,10 +217,12 @@ def stability(from_snapshot: str | None = None, to_snapshot: str | None = None):
 
 
 @app.get("/survival")
-def survival(from_snapshot: str | None = None, to_snapshot: str | None = None):
+def survival(from_snapshot: str | None = None, to_snapshot: str | None = None,
+             dimension: str = "行業大類"):
     frm, to = resolve_pair(from_snapshot, to_snapshot)
+    dim_col(dimension)
     return q("SELECT * FROM survival WHERE from_snapshot = ? AND to_snapshot = ? "
-             "ORDER BY churn_rate DESC", [frm, to])
+             "AND dimension = ? ORDER BY churn_rate DESC", [frm, to, dimension])
 
 
 @app.get("/company-shift")
@@ -216,10 +241,12 @@ def company_shift(from_snapshot: str | None = None, to_snapshot: str | None = No
 
 
 @app.get("/industry-composition")
-def industry_composition(snapshot: str | None = None, min_n: int = 20):
+def industry_composition(snapshot: str | None = None, min_n: int = 20,
+                         dimension: str = "行業大類"):
+    dim_col(dimension)
     sql = ("SELECT f.*, c.label FROM flow_industry_cluster f "
-           "LEFT JOIN clusters c USING (cluster_id) WHERE f.n >= ?")
-    params: list = [min_n]
+           "LEFT JOIN clusters c USING (cluster_id) WHERE f.n >= ? AND f.dimension = ?")
+    params: list = [min_n, dimension]
     if snapshot:
         sql += " AND f.snapshot_date = ?"
         params.append(snapshot)
@@ -253,7 +280,7 @@ def similar(job_id: str, snapshot: str | None = None, k: int = Query(10, le=50))
                 "target_snapshot": target, "results": []}
 
     detail = q(
-        "SELECT job_id, job_title, company_name, industry_bucket, city_name, "
+        "SELECT job_id, job_title, company_name, bucket_label, industry_class, city_name, "
         f"salary_desc, job_url FROM jobs WHERE snapshot_date = ? AND job_id IN "
         f"({','.join('?' * len(hits))})",
         [target] + [h["job_id"] for h in hits])

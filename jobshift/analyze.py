@@ -37,6 +37,10 @@ from jobshift import settings as S
 
 GONE, ADDED = -999, -998   # 遷移矩陣的兩個虛擬端點：下架、新進
 
+# 兩套分類維度。定義與差異見 taxonomy.py —— 職務桶是爬蟲代碼決定的（不精準但可比舊快照），
+# 行業大類是公司行業名查表來的（乾淨）。所有依分類切分的統計都對兩者各算一次。
+DIMENSIONS = {"職務類別": "bucket_label", "行業大類": "industry_class"}
+
 
 # ── 載入 ───────────────────────────────────────────────────────────
 def available_snapshots() -> list[str]:
@@ -55,8 +59,8 @@ def load(snapshot: str) -> tuple[pd.DataFrame, np.ndarray]:
     with db.connect(read_only=True) as con:
         meta = con.execute(
             "SELECT job_id, job_title, company_id, company_name, industry_bucket, "
-            "industry_name, city_name, salary_month_min, job_url "
-            "FROM jobs WHERE snapshot_date = ?",
+            "bucket_label, industry_class, industry_name, city_name, "
+            "salary_month_min, job_url FROM jobs WHERE snapshot_date = ?",
             [snapshot],
         ).df()
     meta["job_id"] = meta["job_id"].astype(str)
@@ -222,19 +226,21 @@ def pairwise(prev: str, cur: str, a: pd.DataFrame, b: pd.DataFrame,
     ids_a, ids_b = set(a.job_id), set(b.job_id)
     kept = sorted(ids_a & ids_b)
 
-    # 存活／汰換（依產業）
+    # 存活／汰換，兩個維度各算一次（職務類別桶、公司行業大類）
     surv = []
-    for bucket in sorted(set(a.industry_bucket) | set(b.industry_bucket)):
-        o = set(a.loc[a.industry_bucket == bucket, "job_id"])
-        n = set(b.loc[b.industry_bucket == bucket, "job_id"])
-        keep = len(o & n)
-        surv.append({
-            "from_snapshot": prev, "to_snapshot": cur, "industry_bucket": bucket,
-            "n_from": len(o), "n_to": len(n), "n_survived": keep,
-            "n_gone": len(o) - keep, "n_added": len(n) - keep,
-            "churn_rate": (len(o) - keep) / len(o) if o else np.nan,
-            "renewal_rate": (len(n) - keep) / len(n) if n else np.nan,
-        })
+    for dim, col in DIMENSIONS.items():
+        for cat in sorted(set(a[col]) | set(b[col])):
+            o = set(a.loc[a[col] == cat, "job_id"])
+            n = set(b.loc[b[col] == cat, "job_id"])
+            keep = len(o & n)
+            surv.append({
+                "from_snapshot": prev, "to_snapshot": cur,
+                "dimension": dim, "category": cat,
+                "n_from": len(o), "n_to": len(n), "n_survived": keep,
+                "n_gone": len(o) - keep, "n_added": len(n) - keep,
+                "churn_rate": (len(o) - keep) / len(o) if o else np.nan,
+                "renewal_rate": (len(n) - keep) / len(n) if n else np.nan,
+            })
 
     # 遷移矩陣：存活職缺的 前期群集 → 後期群集，加上下架／新進兩個端點
     ca = a.set_index("job_id").cluster_id
@@ -265,7 +271,8 @@ def pairwise(prev: str, cur: str, a: pd.DataFrame, b: pd.DataFrame,
         shift.append({
             "from_snapshot": prev, "to_snapshot": cur, "company_id": comp,
             "company_name": gb.company_name.iloc[0],
-            "industry_bucket": gb.industry_bucket.iloc[0],
+            "bucket_label": gb.bucket_label.iloc[0],
+            "industry_class": gb.industry_class.iloc[0],
             "n_from": len(ga), "n_to": len(gb),
             "cos_similarity": cos, "shift_score": 1 - cos,
             "from_cluster": int(fo.mode().iloc[0]) if len(fo) else -1,
@@ -377,11 +384,13 @@ def main() -> None:
 
     ind = []
     for snap, (meta, _) in assigned.items():
-        g = (meta[meta.cluster_id != -1].groupby(["industry_bucket", "cluster_id"])
-             .size().reset_index(name="n"))
-        g["snapshot_date"] = snap
-        g["share_in_industry"] = g.n / g.groupby("industry_bucket").n.transform("sum")
-        ind.append(g)
+        for dim, col in DIMENSIONS.items():
+            g = (meta[meta.cluster_id != -1].groupby([col, "cluster_id"])
+                 .size().reset_index(name="n").rename(columns={col: "category"}))
+            g["snapshot_date"] = snap
+            g["dimension"] = dim
+            g["share_in_category"] = g.n / g.groupby("category").n.transform("sum")
+            ind.append(g)
 
     # 相鄰兩期的遷移
     pairs = {"survival": [], "cluster_flow": [], "company_shift": []}

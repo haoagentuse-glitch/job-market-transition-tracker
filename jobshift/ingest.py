@@ -16,12 +16,13 @@ import unicodedata
 
 import pandas as pd
 
-from jobshift import db
+from jobshift import db, taxonomy
 from jobshift import settings as S
 
 CANONICAL = [
     "snapshot_date", "job_id", "job_title", "company_id", "company_name",
     "updated_at", "industry_id", "industry_name", "industry_bucket",
+    "industry_class", "bucket_label",
     "exp_code", "edu_codes", "major_codes", "city_name",
     "salary_desc", "salary_type", "salary_min", "salary_max", "salary_month_min",
     "description", "description_len", "text_for_embed", "job_url",
@@ -139,6 +140,12 @@ def clean(df: pd.DataFrame, snapshot: str) -> pd.DataFrame:
     df = df[~(bad_title | too_short)].copy()
     n_dropped = n0 - n_dedup - len(df)
 
+    # ④-b 兩套分類維度（都只是查表，不做任何推測；對不到就是「未分類」）
+    #     industry_class：公司行業名 → A–S 大類，這是「產業」維度
+    #     bucket_label  ：爬蟲的職務代碼桶 → 中文名，這是「職務」維度
+    df["industry_class"] = df["industry_name"].map(taxonomy.classify_industry)
+    df["bucket_label"] = df["industry_bucket"].map(taxonomy.bucket_label)
+
     # ⑤ 薪資
     parsed = df["salary_desc"].map(parse_salary)
     df["salary_type"] = [p[0] for p in parsed]
@@ -197,7 +204,14 @@ def main() -> None:
     ap.add_argument("--all", action="store_true", help="舊快照 + 新快照都跑")
     ap.add_argument("--legacy", action="store_true", help="只跑舊快照 CSV")
     ap.add_argument("--snapshot", default=S.SNAPSHOT_DATE, help="新快照日期")
+    ap.add_argument("--rebuild", action="store_true",
+                    help="先砍掉 jobs 表再重建（欄位結構改變時用；需搭配 --all）")
     args = ap.parse_args()
+
+    if args.rebuild:
+        with db.connect() as con:
+            con.execute("DROP TABLE IF EXISTS jobs")
+        print("[ingest] 已砍掉 jobs 表，將從原始檔重建")
 
     if args.all or args.legacy:
         ingest_one("legacy", S.REFERENCE_SNAPSHOT)
