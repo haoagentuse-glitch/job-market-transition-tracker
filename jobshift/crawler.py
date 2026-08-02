@@ -266,6 +266,12 @@ def main() -> None:
     started = datetime.now()
 
     buckets = list(S.INDUSTRY_BUCKETS.items())
+    if S.ONLY_BUCKET:
+        buckets = [(b, c) for b, c in buckets if b == S.ONLY_BUCKET]
+        if not buckets:
+            raise SystemExit(f"沒有名為 {S.ONLY_BUCKET} 的類別；可用："
+                             f"{list(S.INDUSTRY_BUCKETS)}")
+        print(f"※ 只跑 {S.ONLY_BUCKET} —— 換網路後先用它探路，別一上來就跑全場\n")
     est = (len(buckets) - 1) * (S.SLEEP_CATEGORY_MIN + S.SLEEP_CATEGORY_MAX) / 2 / 60
     print(f"快照 {snapshot}｜輸出 {c.out}")
     print(f"節流：每頁 {S.SLEEP_PAGE_MIN}–{S.SLEEP_PAGE_MAX}s、"

@@ -75,6 +75,9 @@ SLEEP_CATEGORY_MIN = float(os.getenv("CRAWL_SLEEP_CAT_MIN", "120"))    # 每類�
 SLEEP_CATEGORY_MAX = float(os.getenv("CRAWL_SLEEP_CAT_MAX", "180"))
 
 MAX_RUNS_PER_CATEGORY = int(os.getenv("CRAWL_MAX_RUNS", "2"))
+# 只跑單一類別。換網路或改參數後拿它探路，用最少的請求判斷會不會被擋，
+# 不要一上來就跑全場把新 IP 也賠進去。
+ONLY_BUCKET = os.getenv("CRAWL_ONLY_BUCKET") or ""
 CRAWL_MAX_RETRIES = int(os.getenv("CRAWL_MAX_RETRIES", "3"))
 # 連續這麼多個 403/429 就中止整場：被擋之後繼續打只會延長封鎖，而且一筆都拿不到。
 CRAWL_ABORT_AFTER_403 = int(os.getenv("CRAWL_ABORT_AFTER_403", "5"))

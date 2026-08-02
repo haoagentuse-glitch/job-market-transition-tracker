@@ -41,6 +41,7 @@ services:
       - CRAWL_SLEEP_CAT_MIN
       - CRAWL_SLEEP_CAT_MAX
       - CRAWL_MAX_RUNS
+      - CRAWL_ONLY_BUCKET
     command: python -m jobshift.pipeline
 
   # ── 單獨跑某個階段：debug 或只想重算分析時用 ────────────────────────
@@ -60,6 +61,7 @@ services:
       - CRAWL_SLEEP_CAT_MIN
       - CRAWL_SLEEP_CAT_MAX
       - CRAWL_MAX_RUNS
+      - CRAWL_ONLY_BUCKET
     command: python -m jobshift.crawler
 
   ingest:                    # 短任務：原始資料 → 清洗 → DuckDB
