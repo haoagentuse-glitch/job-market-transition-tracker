@@ -68,7 +68,7 @@ def main() -> None:
     ap.add_argument("--force", action="store_true")
     args = ap.parse_args()
 
-    targets = [S.BASE_SNAPSHOT, args.snapshot] if args.all else [args.snapshot]
+    targets = [S.REFERENCE_SNAPSHOT, args.snapshot] if args.all else [args.snapshot]
     for snap in targets:
         embed_snapshot(snap, limit=args.limit, force=args.force)
 

@@ -19,7 +19,22 @@ x-gpu: &gpu
             capabilities: [gpu]
 
 services:
-  # ── 批次階段：用 `docker compose run --rm <service>` 手動觸發 ──────────
+  # ── 主入口：跑一次完整的快照更新（每一兩個月一次）──────────────────
+  #   docker compose run --rm pipeline
+  #   斷了就把同一行再跑一次，已完成的階段會自動跳過。
+
+  pipeline:
+    <<: [*base, *gpu]
+    profiles: ["batch"]
+    environment:
+      JOBSHIFT_DATA_DIR: /data
+      JOBSHIFT_SNAPSHOT_DATE: "${JOBSHIFT_SNAPSHOT_DATE:-}"
+      CRAWL_CONCURRENCY: "${CRAWL_CONCURRENCY:-4}"
+      CRAWL_DELAY: "${CRAWL_DELAY:-1.0}"
+      CRAWL_MAX_PAGES: "${CRAWL_MAX_PAGES:-150}"
+    command: python -m jobshift.pipeline
+
+  # ── 單獨跑某個階段：debug 或只想重算分析時用 ────────────────────────
 
   crawl:                     # 長任務 ①：爬取現在這個時刻的快照
     <<: *base

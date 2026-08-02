@@ -1,20 +1,28 @@
 """分群、跨期指派、遷移。整條分析的唯一入口，結果全部落 DuckDB。
 
-方法（三個刻意的選擇，各自有替代方案被否決）：
+設計成「可以一直加快照」，不是一次性的兩期對照：
 
-1. 參考座標系建在「舊快照」上。分群只 fit 一次，新快照是「被指派進來」的。
-   否決的替代：兩期各自分群再對齊 —— 群集編號會漂移，遷移矩陣會變成對齊演算法的產物。
+1. **參考座標系只建一次**，建在最早的那份快照上（`settings.REFERENCE_SNAPSHOT`）。
+   之後每一份新快照都是「被指派進這個座標系」，所以群集編號跨期穩定，
+   時間序列才有意義。否決的替代：每期各自分群再對齊 —— 編號會漂移，
+   看到的變化會變成對齊演算法的產物而不是市場的變化。
 
-2. 跨期指派用「對舊快照的 kNN 多數決」，不用 HDBSCAN 的 approximate_predict。
-   HDBSCAN 的群在 UMAP 空間常是非凸的，用群心距離指派會錯得很難察覺；
-   kNN 直接在原始 1024 維 cosine 空間投票，非凸也不怕，而且票數與相似度天然是信心指標。
+2. **座標系會生長。** 某期出現一批指派不進去的職缺（＝舊快照裡沒有的形態），
+   會被獨立分群、賦予新的群集編號，然後**併回參考池**。
+   下一期就能直接比對到它們 —— 新型態一旦出現就被納入詞彙表，不會每期重新發明。
 
-3. 「遷移」做三層。同一則職缺的描述兩期不會變，硬做 job 層級的群間移動是假的：
-   ① 產業 × 群集的交叉結構重組  ② 群集消長／新生／消亡  ③ 同一家公司招募重心的位移。
+3. **跨期指派用對參考池的 kNN 多數決**，不用群心距離。HDBSCAN 的群在降維空間
+   常是非凸的，群心指派會錯得很難察覺；kNN 在原始 1024 維 cosine 空間投票，
+   非凸也不怕，而且票數與平均相似度天然就是信心指標。
+
+4. **「遷移」拆三層。** 同一則職缺的描述不會變，硬做 job 層級的群間移動是假的：
+   ① 群集的時間序列消長  ② 相鄰兩期的存活／汰換與重新定位  ③ 公司招募重心的位移。
 """
+
 from __future__ import annotations
 
 import argparse
+import itertools
 import json
 
 import numpy as np
@@ -27,10 +35,20 @@ from sklearn.metrics import silhouette_score
 from jobshift import db
 from jobshift import settings as S
 
-EMERGENT_OFFSET = 1000      # 新生群集的 id 從 1000 起跳，跟舊參考群集分得開
+GONE, ADDED = -999, -998   # 遷移矩陣的兩個虛擬端點：下架、新進
 
 
 # ── 載入 ───────────────────────────────────────────────────────────
+def available_snapshots() -> list[str]:
+    """有向量檔的快照，依日期排序。這就是時間軸。"""
+    snaps = sorted(p.stem for p in S.VEC_DIR.glob("*.npy"))
+    if S.REFERENCE_SNAPSHOT not in snaps:
+        raise SystemExit(
+            f"[analyze] 找不到參考快照 {S.REFERENCE_SNAPSHOT} 的向量，請先跑 embed"
+        )
+    return [S.REFERENCE_SNAPSHOT] + [s for s in snaps if s != S.REFERENCE_SNAPSHOT]
+
+
 def load(snapshot: str) -> tuple[pd.DataFrame, np.ndarray]:
     vecs = np.load(S.vec_npy(snapshot))
     ids = pd.read_parquet(S.vec_ids(snapshot))["job_id"].astype(str)
@@ -38,34 +56,43 @@ def load(snapshot: str) -> tuple[pd.DataFrame, np.ndarray]:
         meta = con.execute(
             "SELECT job_id, job_title, company_id, company_name, industry_bucket, "
             "industry_name, city_name, salary_month_min, job_url "
-            "FROM jobs WHERE snapshot_date = ?", [snapshot]
+            "FROM jobs WHERE snapshot_date = ?",
+            [snapshot],
         ).df()
     meta["job_id"] = meta["job_id"].astype(str)
     meta = ids.to_frame().merge(meta, on="job_id", how="left")
-    assert len(meta) == len(vecs), f"{snapshot}: metadata {len(meta)} != 向量 {len(vecs)}"
+    if len(meta) != len(vecs):
+        raise SystemExit(f"{snapshot}: metadata {len(meta)} 筆 != 向量 {len(vecs)} 筆")
     return meta, vecs
 
 
-# ── 參考座標系：在舊快照上分群 ──────────────────────────────────────
-def fit_reference(vecs: np.ndarray) -> tuple[np.ndarray, dict, PCA, object]:
+# ── 參考座標系 ─────────────────────────────────────────────────────
+def fit_reference(vecs: np.ndarray) -> tuple[np.ndarray, dict]:
     n = len(vecs)
     print(f"[analyze] 建參考座標系：{n} 筆 × {vecs.shape[1]} 維")
 
     pca = PCA(n_components=min(S.PCA_DIM, vecs.shape[1]), random_state=0).fit(vecs)
     low = pca.transform(vecs)
-    print(f"[analyze] PCA {vecs.shape[1]}→{low.shape[1]} "
-          f"（保留變異 {pca.explained_variance_ratio_.sum():.1%}）")
+    print(
+        f"[analyze] PCA {vecs.shape[1]}→{low.shape[1]} "
+        f"（保留變異 {pca.explained_variance_ratio_.sum():.1%}）"
+    )
 
     import umap
-    reducer = umap.UMAP(
-        n_components=S.UMAP_DIM, n_neighbors=S.UMAP_NEIGHBORS,
-        min_dist=0.0, metric="cosine", random_state=42, verbose=True,
-    ).fit(low)
-    emb = reducer.embedding_
+
+    emb = umap.UMAP(
+        n_components=S.UMAP_DIM,
+        n_neighbors=S.UMAP_NEIGHBORS,
+        min_dist=0.0,
+        metric="cosine",
+        random_state=42,
+        verbose=True,
+    ).fit_transform(low)
 
     min_size = max(25, int(n * S.HDBSCAN_MIN_FRAC))
-    labels = HDBSCAN(min_cluster_size=min_size, min_samples=10,
-                     cluster_selection_method="eom").fit_predict(emb)
+    labels = HDBSCAN(
+        min_cluster_size=min_size, min_samples=10, cluster_selection_method="eom"
+    ).fit_predict(emb)
     noise = float((labels == -1).mean())
     n_clu = len(set(labels)) - (1 if -1 in labels else 0)
     print(f"[analyze] HDBSCAN(min_cluster_size={min_size}) → {n_clu} 群，噪點 {noise:.1%}")
@@ -74,10 +101,10 @@ def fit_reference(vecs: np.ndarray) -> tuple[np.ndarray, dict, PCA, object]:
     if noise > S.NOISE_FALLBACK or n_clu < 8:
         print(f"[analyze] 噪點超過 {S.NOISE_FALLBACK:.0%} 或群數過少 → 退回 KMeans")
         sub = emb[np.random.default_rng(0).choice(n, min(8000, n), replace=False)]
-        best_k, best_s = None, -1.0
+        best_k, best_s = S.KMEANS_K_GRID[0], -1.0
         for k in S.KMEANS_K_GRID:
-            lab = KMeans(n_clusters=k, n_init=4, random_state=0).fit_predict(sub)
-            s = silhouette_score(sub, lab)
+            s = silhouette_score(sub, KMeans(n_clusters=k, n_init=4, random_state=0)
+                                 .fit_predict(sub))
             print(f"           k={k:>3} silhouette={s:.4f}")
             if s > best_s:
                 best_k, best_s = k, s
@@ -85,17 +112,35 @@ def fit_reference(vecs: np.ndarray) -> tuple[np.ndarray, dict, PCA, object]:
         method = f"kmeans(k={best_k}, silhouette={best_s:.4f})"
         print(f"[analyze] 採用 {method}")
 
-    info = {"method": method, "noise_ratio": noise, "n_clusters": int(
-        len(set(labels)) - (1 if -1 in labels else 0))}
-    return labels, info, pca, reducer
+    n_clu = len(set(labels)) - (1 if -1 in labels else 0)
+    return labels, {"method": method, "noise_ratio": noise, "n_reference_clusters": n_clu}
+
+
+def discover(vecs: np.ndarray, min_frac: float = 0.02) -> np.ndarray:
+    """在一小撮「指派不進參考池」的向量裡找結構。用於新型態偵測。"""
+    n = len(vecs)
+    low = PCA(n_components=min(S.PCA_DIM, n - 1, vecs.shape[1]), random_state=0).fit_transform(vecs)
+    import umap
+
+    emb = umap.UMAP(
+        n_components=min(S.UMAP_DIM, n - 2),
+        n_neighbors=min(S.UMAP_NEIGHBORS, n - 1),
+        min_dist=0.0,
+        metric="cosine",
+        random_state=42,
+    ).fit_transform(low)
+    return HDBSCAN(min_cluster_size=max(25, int(n * min_frac)), min_samples=5).fit_predict(emb)
 
 
 # ── 群集命名：不用斷詞，全靠 embedding + 字元 n-gram ─────────────────
-def label_clusters(meta: pd.DataFrame, vecs: np.ndarray, labels: np.ndarray) -> pd.DataFrame:
-    titles = meta["job_title"].fillna("").tolist()
-    tfidf = TfidfVectorizer(analyzer="char_wb", ngram_range=(2, 4),
-                            min_df=max(2, len(titles) // 5000), max_features=60000)
-    X = tfidf.fit_transform(titles)
+def label_clusters(meta: pd.DataFrame, vecs: np.ndarray, labels: np.ndarray,
+                   kind: str) -> pd.DataFrame:
+    titles = np.array(meta["job_title"].fillna("").tolist())
+    tfidf = TfidfVectorizer(
+        analyzer="char_wb", ngram_range=(2, 4),
+        min_df=max(2, len(titles) // 5000), max_features=60000,
+    )
+    X = tfidf.fit_transform(titles.tolist())
     vocab = np.array(tfidf.get_feature_names_out())
     global_mean = np.asarray(X.mean(axis=0)).ravel()
 
@@ -104,254 +149,254 @@ def label_clusters(meta: pd.DataFrame, vecs: np.ndarray, labels: np.ndarray) -> 
         if cid == -1:
             continue
         mask = labels == cid
-        # 代表職稱：離群心最近的真實職稱（比詞袋好讀，也不需要 tokenizer）
+        # 代表職稱：離群心最近的真實職稱（比詞袋好讀，而且不需要 tokenizer）
         center = vecs[mask].mean(axis=0)
         center /= max(np.linalg.norm(center), 1e-9)
-        sims = vecs[mask] @ center
-        top_idx = np.argsort(-sims)[:8]
-        member_titles = pd.Series(np.array(titles)[mask][top_idx]).drop_duplicates()
-
+        top = np.argsort(-(vecs[mask] @ center))[:8]
+        names = pd.Series(titles[mask][top]).drop_duplicates()
         # 鑑別詞：該群 tfidf 均值減全域均值，取最突出的字元 n-gram
         c_mean = np.asarray(X[mask].mean(axis=0)).ravel()
-        terms = vocab[np.argsort(-(c_mean - global_mean))[:12]]
-        terms = [t.strip() for t in terms if len(t.strip()) >= 2][:6]
-
+        terms = [t.strip() for t in vocab[np.argsort(-(c_mean - global_mean))[:12]]
+                 if len(t.strip()) >= 2][:6]
         rows.append({
             "cluster_id": int(cid),
-            "kind": "reference",
-            "label": member_titles.iloc[0] if len(member_titles) else f"群 {cid}",
-            "top_titles": " / ".join(member_titles.head(5)),
+            "kind": kind,
+            "label": names.iloc[0] if len(names) else f"群 {cid}",
+            "top_titles": " / ".join(names.head(5)),
             "top_terms": " ".join(terms),
         })
     return pd.DataFrame(rows)
 
 
-# ── 跨期指派：對舊快照做 kNN 多數決 ─────────────────────────────────
-def assign_by_knn(new_vecs: np.ndarray, old_vecs: np.ndarray,
-                  old_labels: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+# ── 跨期指派：對參考池做 kNN 多數決 ─────────────────────────────────
+def assign_by_knn(vecs: np.ndarray, pool_vecs: np.ndarray,
+                  pool_labels: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
     try:
         import torch
+
         dev = "cuda" if torch.cuda.is_available() else "cpu"
     except ImportError:
         torch, dev = None, "cpu"
 
-    k = S.KNN_K
-    n = len(new_vecs)
+    k = min(S.KNN_K, len(pool_vecs))
+    n = len(vecs)
     out_lab = np.full(n, -1, dtype=np.int64)
     out_sim = np.zeros(n, dtype=np.float32)
-    chunk = 1024
-    print(f"[analyze] kNN 指派 {n} 筆 → {len(old_vecs)} 筆參考（k={k}, device={dev}）")
+    print(f"[analyze]   kNN 指派 {n} 筆 → 參考池 {len(pool_vecs)} 筆（k={k}, {dev}）")
 
-    if torch is not None:
-        old_t = torch.from_numpy(old_vecs).to(dev)
-    for start in range(0, n, chunk):
-        blk = new_vecs[start:start + chunk]
+    pool_t = torch.from_numpy(np.ascontiguousarray(pool_vecs)).to(dev) if torch else None
+    for start in range(0, n, 1024):
+        blk = np.ascontiguousarray(vecs[start:start + 1024])
         if torch is not None:
-            sim = (torch.from_numpy(blk).to(dev) @ old_t.T)
-            top_sim, top_idx = torch.topk(sim, k, dim=1)
-            top_sim = top_sim.cpu().numpy()
-            top_idx = top_idx.cpu().numpy()
+            sim = torch.from_numpy(blk).to(dev) @ pool_t.T
+            top_sim_t, top_idx_t = torch.topk(sim, k, dim=1)
+            top_sim, top_idx = top_sim_t.cpu().numpy(), top_idx_t.cpu().numpy()
         else:
-            sim = blk @ old_vecs.T
-            top_idx = np.argpartition(-sim, k, axis=1)[:, :k]
+            sim = blk @ pool_vecs.T
+            top_idx = np.argpartition(-sim, k - 1, axis=1)[:, :k]
             top_sim = np.take_along_axis(sim, top_idx, axis=1)
 
-        neigh_lab = old_labels[top_idx]
+        neigh = pool_labels[top_idx]
         for i in range(len(blk)):
-            lab, sm = neigh_lab[i], top_sim[i]
+            lab, sm = neigh[i], top_sim[i]
             valid = lab != -1
             if not valid.any():
                 continue
             vals, counts = np.unique(lab[valid], return_counts=True)
             win = vals[counts.argmax()]
-            ratio = counts.max() / k
             mean_sim = float(sm[lab == win].mean())
-            if ratio >= S.KNN_VOTE_RATIO and mean_sim >= S.KNN_SIM_FLOOR:
+            out_sim[start + i] = mean_sim
+            if counts.max() / k >= S.KNN_VOTE_RATIO and mean_sim >= S.KNN_SIM_FLOOR:
                 out_lab[start + i] = win
-                out_sim[start + i] = mean_sim
-            else:
-                out_sim[start + i] = mean_sim
     hit = (out_lab != -1).mean()
-    print(f"[analyze] 指派成功率 {hit:.1%}，未歸類 {(out_lab == -1).sum()} 筆（新型態候選）")
+    print(f"[analyze]   指派成功率 {hit:.1%}，未歸類 {(out_lab == -1).sum()} 筆")
     return out_lab, out_sim
 
 
-def find_emergent(new_meta: pd.DataFrame, new_vecs: np.ndarray, labels: np.ndarray,
-                  pca: PCA, reducer) -> tuple[np.ndarray, pd.DataFrame]:
-    """未歸類的新職缺自己再分一次群 —— 這些就是舊快照裡沒有的形態。"""
-    idx = np.where(labels == -1)[0]
-    if len(idx) < 60:
-        print("[analyze] 未歸類數量太少，不做新生群集偵測")
-        return labels, pd.DataFrame(columns=["cluster_id", "kind", "label",
-                                             "top_titles", "top_terms"])
-    emb = reducer.transform(pca.transform(new_vecs[idx]))
-    min_size = max(25, int(len(idx) * 0.02))
-    sub = HDBSCAN(min_cluster_size=min_size, min_samples=5).fit_predict(emb)
-    n_new = len(set(sub)) - (1 if -1 in sub else 0)
-    print(f"[analyze] 新生群集偵測：{len(idx)} 筆未歸類 → {n_new} 個新群")
-    if n_new == 0:
-        return labels, pd.DataFrame(columns=["cluster_id", "kind", "label",
-                                             "top_titles", "top_terms"])
+# ── 相鄰兩期的遷移 ─────────────────────────────────────────────────
+def pairwise(prev: str, cur: str, a: pd.DataFrame, b: pd.DataFrame,
+             va: np.ndarray, vb: np.ndarray) -> dict[str, pd.DataFrame]:
+    ids_a, ids_b = set(a.job_id), set(b.job_id)
+    kept = sorted(ids_a & ids_b)
 
-    labels = labels.copy()
-    labels[idx] = np.where(sub == -1, -1, sub + EMERGENT_OFFSET)
-    rows = label_clusters(new_meta.iloc[idx].reset_index(drop=True),
-                          new_vecs[idx], np.where(sub == -1, -1, sub))
-    rows["cluster_id"] += EMERGENT_OFFSET
-    rows["kind"] = "emergent"
-    return labels, rows
-
-
-# ── 三層遷移 ───────────────────────────────────────────────────────
-def build_outputs(old_meta, new_meta, old_lab, new_lab, new_sim,
-                  clusters: pd.DataFrame, old_vecs, new_vecs, info: dict) -> dict:
-    old_meta = old_meta.assign(cluster_id=old_lab, sim=1.0)
-    new_meta = new_meta.assign(cluster_id=new_lab, sim=new_sim)
-
-    # ② 群集消長
-    c_old = old_meta.cluster_id.value_counts()
-    c_new = new_meta.cluster_id.value_counts()
-    n_old_tot, n_new_tot = len(old_meta), len(new_meta)
-    clusters = clusters.set_index("cluster_id")
-    clusters["n_old"] = c_old.reindex(clusters.index).fillna(0).astype(int)
-    clusters["n_new"] = c_new.reindex(clusters.index).fillna(0).astype(int)
-    clusters["delta"] = clusters.n_new - clusters.n_old
-    clusters["share_old"] = clusters.n_old / n_old_tot
-    clusters["share_new"] = clusters.n_new / n_new_tot
-    clusters["share_delta_pp"] = (clusters.share_new - clusters.share_old) * 100
-    clusters["growth_pct"] = np.where(
-        clusters.n_old > 0, (clusters.n_new - clusters.n_old) / clusters.n_old * 100, np.nan)
-    clusters["status"] = np.select(
-        [clusters.kind.eq("emergent"), clusters.n_new == 0,
-         clusters.share_delta_pp > 0.2, clusters.share_delta_pp < -0.2],
-        ["新生", "消亡", "擴張", "萎縮"], default="持平")
-    for snap, m in (("old", old_meta), ("new", new_meta)):
-        med = m.groupby("cluster_id").salary_month_min.median()
-        clusters[f"salary_{snap}"] = med.reindex(clusters.index)
-    clusters = clusters.reset_index()
-
-    # ① 產業 × 群集 交叉結構
-    flows = []
-    for snap, m in ((S.BASE_SNAPSHOT, old_meta), (info["new_snapshot"], new_meta)):
-        g = (m[m.cluster_id != -1]
-             .groupby(["industry_bucket", "cluster_id"]).size()
-             .reset_index(name="n"))
-        g["snapshot_date"] = snap
-        g["share_in_industry"] = g.n / g.groupby("industry_bucket").n.transform("sum")
-        flows.append(g)
-    flow_df = pd.concat(flows, ignore_index=True)
-
-    # 存活／汰換
-    old_ids, new_ids = set(old_meta.job_id), set(new_meta.job_id)
+    # 存活／汰換（依產業）
     surv = []
-    for bucket in sorted(set(old_meta.industry_bucket) | set(new_meta.industry_bucket)):
-        o = set(old_meta.loc[old_meta.industry_bucket == bucket, "job_id"])
-        nn = set(new_meta.loc[new_meta.industry_bucket == bucket, "job_id"])
-        keep = len(o & nn)
-        surv.append({"industry_bucket": bucket, "n_old": len(o), "n_new": len(nn),
-                     "n_survived": keep, "n_gone": len(o) - keep, "n_added": len(nn) - keep,
-                     "churn_rate": (len(o) - keep) / len(o) if o else np.nan,
-                     "renewal_rate": (len(nn) - keep) / len(nn) if nn else np.nan})
-    surv_df = pd.DataFrame(surv)
-    print(f"[analyze] 全體存活：{len(old_ids & new_ids)} / {len(old_ids)} "
-          f"（{len(old_ids & new_ids) / len(old_ids):.1%}）")
+    for bucket in sorted(set(a.industry_bucket) | set(b.industry_bucket)):
+        o = set(a.loc[a.industry_bucket == bucket, "job_id"])
+        n = set(b.loc[b.industry_bucket == bucket, "job_id"])
+        keep = len(o & n)
+        surv.append({
+            "from_snapshot": prev, "to_snapshot": cur, "industry_bucket": bucket,
+            "n_from": len(o), "n_to": len(n), "n_survived": keep,
+            "n_gone": len(o) - keep, "n_added": len(n) - keep,
+            "churn_rate": (len(o) - keep) / len(o) if o else np.nan,
+            "renewal_rate": (len(n) - keep) / len(n) if n else np.nan,
+        })
 
-    # ③ 公司層級語意位移：兩期都招募 ≥3 筆的公司，比較招募重心向量
+    # 遷移矩陣：存活職缺的 前期群集 → 後期群集，加上下架／新進兩個端點
+    ca = a.set_index("job_id").cluster_id
+    cb = b.set_index("job_id").cluster_id
+    pair = pd.DataFrame({"from_cluster": ca.reindex(kept).to_numpy(),
+                         "to_cluster": cb.reindex(kept).to_numpy()})
+    mat = pair.groupby(["from_cluster", "to_cluster"]).size().reset_index(name="n")
+    mat["kind"] = np.where(mat.from_cluster == mat.to_cluster, "stayed", "moved")
+    gone = (a[~a.job_id.isin(kept)].groupby("cluster_id").size().reset_index(name="n")
+            .rename(columns={"cluster_id": "from_cluster"}).assign(to_cluster=GONE, kind="gone"))
+    added = (b[~b.job_id.isin(kept)].groupby("cluster_id").size().reset_index(name="n")
+             .rename(columns={"cluster_id": "to_cluster"}).assign(from_cluster=ADDED, kind="added"))
+    flow = pd.concat([mat, gone, added], ignore_index=True)
+    flow["from_snapshot"], flow["to_snapshot"] = prev, cur
+    flow = flow[["from_snapshot", "to_snapshot", "from_cluster", "to_cluster", "n", "kind"]]
+
+    # 公司招募重心的位移
     shift = []
-    old_idx = {c: g.index.values for c, g in old_meta.groupby("company_id")}
-    for comp, g_new in new_meta.groupby("company_id"):
-        g_old_idx = old_idx.get(comp)
-        if g_old_idx is None or len(g_old_idx) < 3 or len(g_new) < 3:
+    idx_a = {c: g.index.to_numpy() for c, g in a.groupby("company_id")}
+    for comp, gb in b.groupby("company_id"):
+        ga = idx_a.get(comp)
+        if ga is None or len(ga) < 3 or len(gb) < 3:
             continue
-        vo = old_vecs[g_old_idx].mean(axis=0)
-        vn = new_vecs[g_new.index.values].mean(axis=0)
+        vo, vn = va[ga].mean(axis=0), vb[gb.index.to_numpy()].mean(axis=0)
         cos = float(vo @ vn / max(np.linalg.norm(vo) * np.linalg.norm(vn), 1e-9))
-        fo = old_meta.loc[g_old_idx].cluster_id
-        fo = fo[fo != -1]
-        fn = g_new.cluster_id[g_new.cluster_id != -1]
+        fo = a.loc[ga].cluster_id
+        fo, fn = fo[fo != -1], gb.cluster_id[gb.cluster_id != -1]
         shift.append({
-            "company_id": comp,
-            "company_name": g_new.company_name.iloc[0],
-            "industry_bucket": g_new.industry_bucket.iloc[0],
-            "n_old": len(g_old_idx), "n_new": len(g_new),
+            "from_snapshot": prev, "to_snapshot": cur, "company_id": comp,
+            "company_name": gb.company_name.iloc[0],
+            "industry_bucket": gb.industry_bucket.iloc[0],
+            "n_from": len(ga), "n_to": len(gb),
             "cos_similarity": cos, "shift_score": 1 - cos,
             "from_cluster": int(fo.mode().iloc[0]) if len(fo) else -1,
             "to_cluster": int(fn.mode().iloc[0]) if len(fn) else -1,
         })
-    shift_df = pd.DataFrame(shift).sort_values("shift_score", ascending=False)
-    print(f"[analyze] 公司遷移：{len(shift_df)} 家兩期都有 ≥3 筆招募")
 
-    # 遷移矩陣：存活職缺的 舊群集 → 新群集（多數是自環，離開自環的就是真的被重新定位），
-    # 外加「下架」與「新進」兩個端點，讓 Sankey 的流量兩邊守恆。
-    surv_ids = old_ids & new_ids
-    surv_list = sorted(surv_ids)        # 固定順序，兩次 reindex 才對得起來
-    o_c = old_meta.set_index("job_id").cluster_id
-    n_c = new_meta.set_index("job_id").cluster_id
-    pair = pd.DataFrame({"from_cluster": o_c.reindex(surv_list).to_numpy(),
-                         "to_cluster": n_c.reindex(surv_list).to_numpy()})
-    mat = pair.groupby(["from_cluster", "to_cluster"]).size().reset_index(name="n")
-    mat["kind"] = np.where(mat.from_cluster == mat.to_cluster, "stayed", "moved")
-
-    gone = (old_meta[~old_meta.job_id.isin(surv_ids)]
-            .groupby("cluster_id").size().reset_index(name="n")
-            .rename(columns={"cluster_id": "from_cluster"}))
-    gone["to_cluster"], gone["kind"] = -999, "gone"          # -999 = 下架
-    added = (new_meta[~new_meta.job_id.isin(surv_ids)]
-             .groupby("cluster_id").size().reset_index(name="n")
-             .rename(columns={"cluster_id": "to_cluster"}))
-    added["from_cluster"], added["kind"] = -998, "added"     # -998 = 新進
-    flow_mat = pd.concat([mat, gone, added], ignore_index=True)[
-        ["from_cluster", "to_cluster", "n", "kind"]]
-    moved = flow_mat.loc[flow_mat.kind == "moved", "n"].sum()
-    print(f"[analyze] 遷移矩陣：存活 {len(surv_ids)} 筆，其中 {moved} 筆換了群集")
-
-    jc = pd.concat([
-        old_meta.assign(snapshot_date=S.BASE_SNAPSHOT),
-        new_meta.assign(snapshot_date=info["new_snapshot"]),
-    ])[["snapshot_date", "job_id", "cluster_id", "sim"]]
-
-    return {"clusters": clusters, "job_cluster": jc, "flow_industry_cluster": flow_df,
-            "cluster_flow": flow_mat, "survival": surv_df, "company_shift": shift_df}
+    moved = int(flow.loc[flow.kind == "moved", "n"].sum())
+    print(f"[analyze] {prev} → {cur}：存活 {len(kept)}/{len(ids_a)} "
+          f"（{len(kept) / max(len(ids_a), 1):.1%}），其中 {moved} 筆換群；"
+          f"公司位移樣本 {len(shift)} 家")
+    return {"survival": pd.DataFrame(surv), "cluster_flow": flow,
+            "company_shift": pd.DataFrame(shift)}
 
 
 # ── 主流程 ─────────────────────────────────────────────────────────
 def main() -> None:
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--snapshot", default=S.SNAPSHOT_DATE, help="新快照日期")
+    ap = argparse.ArgumentParser(description="對所有已向量化的快照做分群與遷移分析")
+    ap.add_argument("--refit", action="store_true",
+                    help="重建參考座標系（會讓既有群集編號全部作廢）")
     args = ap.parse_args()
 
-    old_meta, old_vecs = load(S.BASE_SNAPSHOT)
-    new_meta, new_vecs = load(args.snapshot)
+    snaps = available_snapshots()
+    print(f"[analyze] 時間軸：{' → '.join(snaps)}")
 
-    old_lab, info, pca, reducer = fit_reference(old_vecs)
-    info["new_snapshot"] = args.snapshot
-    clusters = label_clusters(old_meta, old_vecs, old_lab)
+    ref_meta, ref_vecs = load(S.REFERENCE_SNAPSHOT)
+    with db.connect(read_only=True) as con:
+        cached = (db.table_exists(con, "reference_labels") and not args.refit
+                  and con.execute("SELECT count(*) FROM reference_labels").fetchone()[0]
+                  == len(ref_meta))
+        ref_labels_df = con.execute("SELECT * FROM reference_labels").df() if cached else None
 
-    new_lab, new_sim = assign_by_knn(new_vecs, old_vecs, old_lab)
-    new_lab, emergent = find_emergent(new_meta, new_vecs, new_lab, pca, reducer)
-    if len(emergent):
-        clusters = pd.concat([clusters, emergent], ignore_index=True)
+    if cached:
+        ref_labels = (ref_labels_df.set_index("job_id").cluster_id
+                      .reindex(ref_meta.job_id).to_numpy())
+        info = {"method": "cached", "noise_ratio": float((ref_labels == -1).mean()),
+                "n_reference_clusters": int(len(set(ref_labels)) - 1)}
+        print(f"[analyze] 沿用既有參考座標系（{info['n_reference_clusters']} 群）"
+              "；要重建請加 --refit")
+    else:
+        ref_labels, info = fit_reference(ref_vecs)
 
-    out = build_outputs(old_meta, new_meta, old_lab, new_lab, new_sim,
-                        clusters, old_vecs, new_vecs, info)
+    catalog = label_clusters(ref_meta, ref_vecs, ref_labels, "reference")
+    pool_vecs, pool_labels = ref_vecs, ref_labels
+    next_id = int(catalog.cluster_id.max()) + 1 if len(catalog) else 0
+
+    assigned: dict[str, tuple[pd.DataFrame, np.ndarray]] = {
+        S.REFERENCE_SNAPSHOT: (ref_meta.assign(cluster_id=ref_labels, sim=1.0), ref_vecs)
+    }
+
+    for snap in snaps[1:]:
+        print(f"\n[analyze] === {snap} ===")
+        meta, vecs = load(snap)
+        lab, sim = assign_by_knn(vecs, pool_vecs, pool_labels)
+
+        # 指派不進去的 → 獨立分群 → 成為新群集 → 併回參考池，下一期就能比對到
+        idx = np.where(lab == -1)[0]
+        if len(idx) >= 60:
+            sub = discover(vecs[idx])
+            n_new = len(set(sub)) - (1 if -1 in sub else 0)
+            print(f"[analyze]   新型態偵測：{len(idx)} 筆未歸類 → {n_new} 個新群集")
+            if n_new:
+                remap = {old: next_id + i
+                         for i, old in enumerate(sorted(c for c in set(sub) if c != -1))}
+                new_rows = label_clusters(meta.iloc[idx].reset_index(drop=True),
+                                          vecs[idx], sub, "emergent")
+                new_rows["cluster_id"] = new_rows.cluster_id.map(remap)
+                new_rows["first_seen"] = snap
+                catalog = pd.concat([catalog, new_rows], ignore_index=True)
+                lab[idx] = [remap.get(c, -1) for c in sub]
+                grew = idx[sub != -1]
+                pool_vecs = np.vstack([pool_vecs, vecs[grew]])
+                pool_labels = np.concatenate([pool_labels, lab[grew]])
+                next_id += n_new
+                print(f"[analyze]   參考池成長至 {len(pool_vecs)} 筆")
+        assigned[snap] = (meta.assign(cluster_id=lab, sim=sim), vecs)
+
+    # 時間序列
+    ts = []
+    for snap, (meta, _) in assigned.items():
+        vc = meta.cluster_id.value_counts()
+        for cid, n in vc.items():
+            ts.append({"snapshot_date": snap, "cluster_id": int(cid), "n": int(n),
+                       "share": n / len(meta)})
+    ts_df = pd.DataFrame(ts)
+
+    ind = []
+    for snap, (meta, _) in assigned.items():
+        g = (meta[meta.cluster_id != -1].groupby(["industry_bucket", "cluster_id"])
+             .size().reset_index(name="n"))
+        g["snapshot_date"] = snap
+        g["share_in_industry"] = g.n / g.groupby("industry_bucket").n.transform("sum")
+        ind.append(g)
+
+    # 相鄰兩期的遷移
+    pairs = {"survival": [], "cluster_flow": [], "company_shift": []}
+    for prev, cur in itertools.pairwise(snaps):
+        (a, va), (b, vb) = assigned[prev], assigned[cur]
+        for key, dfp in pairwise(prev, cur, a, b, va, vb).items():
+            pairs[key].append(dfp)
+
+    if "first_seen" not in catalog.columns:
+        catalog["first_seen"] = S.REFERENCE_SNAPSHOT
+    catalog["first_seen"] = catalog.first_seen.fillna(S.REFERENCE_SNAPSHOT)
 
     meta_rows = pd.DataFrame([
-        {"key": "base_snapshot", "value": S.BASE_SNAPSHOT},
-        {"key": "new_snapshot", "value": args.snapshot},
+        {"key": "reference_snapshot", "value": S.REFERENCE_SNAPSHOT},
+        {"key": "snapshots", "value": json.dumps(snaps)},
+        {"key": "latest_snapshot", "value": snaps[-1]},
         {"key": "cluster_method", "value": info["method"]},
         {"key": "noise_ratio", "value": f"{info['noise_ratio']:.4f}"},
-        {"key": "n_reference_clusters", "value": str(info["n_clusters"])},
+        {"key": "n_reference_clusters", "value": str(info["n_reference_clusters"])},
+        {"key": "n_clusters_total", "value": str(len(catalog))},
         {"key": "params", "value": json.dumps(
             {"knn_k": S.KNN_K, "vote_ratio": S.KNN_VOTE_RATIO,
              "sim_floor": S.KNN_SIM_FLOOR, "umap_dim": S.UMAP_DIM}, ensure_ascii=False)},
     ])
 
+    jc = pd.concat([m.assign(snapshot_date=s)[["snapshot_date", "job_id", "cluster_id", "sim"]]
+                    for s, (m, _) in assigned.items()], ignore_index=True)
+
     with db.connect() as con:
-        for name, df in out.items():
-            db.replace_table(con, name, df)
+        db.replace_table(con, "reference_labels",
+                         pd.DataFrame({"job_id": ref_meta.job_id, "cluster_id": ref_labels}))
+        db.replace_table(con, "clusters", catalog)
+        db.replace_table(con, "cluster_timeseries", ts_df)
+        db.replace_table(con, "flow_industry_cluster", pd.concat(ind, ignore_index=True))
+        db.replace_table(con, "job_cluster", jc)
+        for key, frames in pairs.items():
+            db.replace_table(con, key, pd.concat(frames, ignore_index=True)
+                             if frames else pd.DataFrame())
         db.replace_table(con, "analysis_meta", meta_rows)
-    print("[analyze] 完成，已寫入 DuckDB："
-          + "、".join(out.keys()) + "、analysis_meta")
+
+    print(f"\n[analyze] 完成。快照 {len(snaps)} 份、群集 {len(catalog)} 個"
+          f"（其中新生 {int((catalog.kind == 'emergent').sum())} 個）")
 
 
 if __name__ == "__main__":

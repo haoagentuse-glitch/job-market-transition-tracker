@@ -200,7 +200,7 @@ def main() -> None:
     args = ap.parse_args()
 
     if args.all or args.legacy:
-        ingest_one("legacy", S.BASE_SNAPSHOT)
+        ingest_one("legacy", S.REFERENCE_SNAPSHOT)
     if args.all or not args.legacy:
         ingest_one("jsonl", args.snapshot)
 

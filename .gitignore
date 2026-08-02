@@ -5,3 +5,6 @@ data/
 *.jsonl
 __pycache__/
 .venv/
+
+# 內部筆記，不進版控
+NOTES.md

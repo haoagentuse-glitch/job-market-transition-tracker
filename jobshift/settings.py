@@ -15,12 +15,15 @@ for _d in (RAW_DIR, VEC_DIR):
     _d.mkdir(parents=True, exist_ok=True)
 
 # ── 快照 ────────────────────────────────────────────────────────────
-# 舊快照：2026-05-19 的 55MB CSV，來自前一版專案，已被每類 4500 上限截斷。
-BASE_SNAPSHOT = "2026-05-19"
-LEGACY_CSV = RAW_DIR / f"snapshot_{BASE_SNAPSHOT}_raw.csv"
+# 參考快照：語意座標系建在它上面，之後每一份新快照都指派進這個座標系。
+# 換掉它＝所有群集編號作廢、時間序列從頭來過，所以基本上不該換。
+# 用 `or` 而不是 getenv 的 default：compose 會把未設定的變數展開成空字串，
+# 那樣 getenv 拿到的是 ""（有設定但為空），default 不會生效。
+REFERENCE_SNAPSHOT = os.getenv("JOBSHIFT_REFERENCE_SNAPSHOT") or "2026-05-19"
+LEGACY_CSV = RAW_DIR / f"snapshot_{REFERENCE_SNAPSHOT}_raw.csv"
 
-# 新快照：預設今天。爬蟲與後續階段都吃這個值。
-SNAPSHOT_DATE = os.getenv("JOBSHIFT_SNAPSHOT_DATE", date.today().isoformat())
+# 這次要跑的快照。預設今天。
+SNAPSHOT_DATE = os.getenv("JOBSHIFT_SNAPSHOT_DATE") or date.today().isoformat()
 
 
 def raw_jsonl(snapshot: str) -> Path:

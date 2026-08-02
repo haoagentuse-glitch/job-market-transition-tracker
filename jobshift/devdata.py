@@ -24,7 +24,7 @@ def main() -> None:
     args = ap.parse_args()
 
     rng = np.random.default_rng(7)
-    df = ingest.load_legacy_csv(S.LEGACY_CSV, S.BASE_SNAPSHOT)
+    df = ingest.load_legacy_csv(S.LEGACY_CSV, S.REFERENCE_SNAPSHOT)
     # 依 job_id 排序後取前 N —— 跟 `embed --limit` 的 ORDER BY job_id 對齊，
     # 這樣骨架測試時基準期與對照期的存活職缺才會真的重疊。
     df = df.sort_values("job_id", key=lambda s: s.astype(str)).reset_index(drop=True)
