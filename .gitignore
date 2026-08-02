@@ -8,5 +8,6 @@
 __pycache__/
 .venv/
 
-# 內部筆記，不進版控
+# 內部筆記與交接文件，不進版控
 NOTES.md
+HANDOFF.md
