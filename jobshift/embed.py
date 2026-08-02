@@ -18,9 +18,20 @@ from jobshift import settings as S
 
 def embed_snapshot(snapshot: str, limit: int | None = None, force: bool = False) -> None:
     npy_path, ids_path = S.vec_npy(snapshot), S.vec_ids(snapshot)
+
+    with db.connect(read_only=True) as con:
+        n_rows = con.execute("SELECT count(*) FROM jobs WHERE snapshot_date = ?",
+                             [snapshot]).fetchone()[0]
+
     if npy_path.exists() and not force:
-        print(f"[embed] {snapshot} 已存在 {npy_path.name}，跳過（--force 可覆寫）")
-        return
+        # 只看檔案在不在會踩到大坑：用 --limit 產出的向量檔筆數對不上 jobs 表，
+        # 後面 analyze 會靜默地只分析那一小撮，跑完才發現結論建在部分資料上。
+        have = np.load(npy_path, mmap_mode="r").shape[0]
+        want = min(n_rows, limit) if limit else n_rows
+        if have == want:
+            print(f"[embed] {snapshot} 已存在 {npy_path.name}（{have:,} 筆），跳過")
+            return
+        print(f"[embed] {snapshot} 既有向量 {have:,} 筆，但需要 {want:,} 筆 → 重做")
 
     with db.connect(read_only=True) as con:
         sql = ("SELECT job_id, text_for_embed FROM jobs "

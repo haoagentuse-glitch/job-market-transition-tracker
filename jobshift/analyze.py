@@ -60,9 +60,13 @@ def load(snapshot: str) -> tuple[pd.DataFrame, np.ndarray]:
             [snapshot],
         ).df()
     meta["job_id"] = meta["job_id"].astype(str)
+    n_db = len(meta)
     meta = ids.to_frame().merge(meta, on="job_id", how="left")
     if len(meta) != len(vecs):
         raise SystemExit(f"{snapshot}: metadata {len(meta)} 筆 != 向量 {len(vecs)} 筆")
+    if len(vecs) < n_db:
+        print(f"[analyze] ⚠ {snapshot}: jobs 表有 {n_db:,} 筆但只有 {len(vecs):,} 筆向量，"
+              "分析只會涵蓋有向量的那些。跑 embed --force 補齊。")
     return meta, vecs
 
 
