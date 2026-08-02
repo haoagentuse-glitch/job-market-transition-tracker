@@ -13,6 +13,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import subprocess
 import sys
 import time
@@ -34,12 +35,21 @@ def run(label: str, cmd: list[str]) -> None:
     print(f"✓ {label} 完成，耗時 {time.time() - t0:.0f}s", flush=True)
 
 
-def already_crawled(snapshot: str) -> int:
+def crawl_state(snapshot: str) -> tuple[int, bool]:
+    """回傳（已落地筆數, 是否整場跑完）。
+
+    只看「JSONL 有沒有內容」是不夠的：被擋在半路時檔案裡有資料但資料不完整，
+    那樣會直接跳過爬取、拿半份快照去做分析。完成與否要看爬蟲自己寫的標記。
+    """
     path = S.raw_jsonl(snapshot)
-    if not path.exists():
-        return 0
-    with open(path, encoding="utf-8") as f:
-        return sum(1 for line in f if line.strip())
+    n = 0
+    if path.exists():
+        with open(path, encoding="utf-8") as f:
+            n = sum(1 for line in f if line.strip())
+    prog = S.crawl_progress(snapshot)
+    complete = (json.loads(prog.read_text(encoding="utf-8")).get("complete", False)
+                if prog.exists() else False)
+    return n, complete
 
 
 def already_ingested(snapshot: str) -> int:
@@ -71,11 +81,13 @@ def main() -> None:
 
     # ① 爬取
     if start_at <= 0:
-        n = already_crawled(snap)
-        if n and not args.force:
-            print(f"\n⏭  crawl 跳過：{S.raw_jsonl(snap).name} 已有 {n:,} 筆。"
-                  "要重爬請先刪掉該檔，或加 --force。")
+        n, complete = crawl_state(snap)
+        if complete and not args.force:
+            print(f"\n⏭  crawl 跳過：{S.raw_jsonl(snap).name} 已完整抓完 {n:,} 筆。"
+                  "要重爬請刪掉該檔與同名的 _progress.json，或加 --force。")
         else:
+            if n:
+                print(f"\n↻ 上次抓到一半（{n:,} 筆），這次從斷點續抓")
             run("① 爬取 1111 職缺", ["jobshift.spider"])
 
     # ② 清洗入庫（參考快照只在第一次需要）

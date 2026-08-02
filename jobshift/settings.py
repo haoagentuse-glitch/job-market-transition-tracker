@@ -30,6 +30,11 @@ def raw_jsonl(snapshot: str) -> Path:
     return RAW_DIR / f"snapshot_{snapshot}_raw.jsonl"
 
 
+def crawl_progress(snapshot: str) -> Path:
+    """已經抓完的 (桶, 頁)。序列爬完整場要幾小時，中斷後不該從頭再來。"""
+    return RAW_DIR / f"snapshot_{snapshot}_progress.json"
+
+
 def vec_npy(snapshot: str) -> Path:
     return VEC_DIR / f"{snapshot}.npy"
 
@@ -51,8 +56,14 @@ PAGE_SIZE = 30                                   # API pagination.limit
 MAX_PAGES = int(os.getenv("CRAWL_MAX_PAGES", "150"))   # 150 × 30 = 4500／類，同舊上限
 TARGET_PER_CATEGORY = 4500
 
-CRAWL_CONCURRENCY = int(os.getenv("CRAWL_CONCURRENCY", "4"))
-CRAWL_DELAY = float(os.getenv("CRAWL_DELAY", "1.0"))
+# 不併發：一次一個請求，每個請求之間固定間隔 3 秒（約 0.33 req/s）。
+# 這是舊版爬蟲用過、確實抓完 6.5 萬筆而沒被擋的速率，是唯一有證據支持安全的。
+# 實測反例：併發 4 ＋ 1 秒延遲（約 1 req/s）在約 70 個請求後就被整站封鎖 IP，
+# 連首頁 HTML 都回 403。不要調高這兩個值。
+CRAWL_CONCURRENCY = int(os.getenv("CRAWL_CONCURRENCY", "1"))
+CRAWL_DELAY = float(os.getenv("CRAWL_DELAY", "3.0"))
+# 連續這麼多個 403 就中止整場爬取：被擋之後繼續打只會延長封鎖，而且一筆都拿不到。
+CRAWL_ABORT_AFTER_403 = int(os.getenv("CRAWL_ABORT_AFTER_403", "5"))
 
 # ── 產業分類（20 桶，沿用舊定義，保留為分析維度）────────────────────
 INDUSTRY_BUCKETS: dict[str, list[str]] = {

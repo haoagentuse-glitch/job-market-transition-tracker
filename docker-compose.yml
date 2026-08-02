@@ -26,12 +26,16 @@ services:
   pipeline:
     <<: [*base, *gpu]
     profiles: ["batch"]
+    # 只列變數名不給值＝有設才傳進去。寫成 "${X:-預設}" 會讓 compose 也持有一份
+    # 預設值，跟 settings.py 那份各走各的 —— 實際踩過：settings 寫 3 秒、
+    # compose 還留著舊的 1 秒，結果爬蟲用 1 秒跑，被擋了才發現。
     environment:
-      JOBSHIFT_DATA_DIR: /data
-      JOBSHIFT_SNAPSHOT_DATE: "${JOBSHIFT_SNAPSHOT_DATE:-}"
-      CRAWL_CONCURRENCY: "${CRAWL_CONCURRENCY:-4}"
-      CRAWL_DELAY: "${CRAWL_DELAY:-1.0}"
-      CRAWL_MAX_PAGES: "${CRAWL_MAX_PAGES:-150}"
+      - JOBSHIFT_DATA_DIR=/data
+      - JOBSHIFT_SNAPSHOT_DATE
+      - CRAWL_CONCURRENCY
+      - CRAWL_DELAY
+      - CRAWL_MAX_PAGES
+      - CRAWL_ABORT_AFTER_403
     command: python -m jobshift.pipeline
 
   # ── 單獨跑某個階段：debug 或只想重算分析時用 ────────────────────────
@@ -40,10 +44,12 @@ services:
     <<: *base
     profiles: ["batch"]
     environment:
-      JOBSHIFT_DATA_DIR: /data
-      CRAWL_CONCURRENCY: "${CRAWL_CONCURRENCY:-4}"
-      CRAWL_DELAY: "${CRAWL_DELAY:-1.0}"
-      CRAWL_MAX_PAGES: "${CRAWL_MAX_PAGES:-150}"
+      - JOBSHIFT_DATA_DIR=/data
+      - JOBSHIFT_SNAPSHOT_DATE
+      - CRAWL_CONCURRENCY
+      - CRAWL_DELAY
+      - CRAWL_MAX_PAGES
+      - CRAWL_ABORT_AFTER_403
     command: python -m jobshift.spider
 
   ingest:                    # 短任務：原始資料 → 清洗 → DuckDB
