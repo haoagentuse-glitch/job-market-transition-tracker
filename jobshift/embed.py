@@ -6,6 +6,7 @@ numpy/torch 直接吃記憶體映射最快；DuckDB 只存 metadata 與分析結
 from __future__ import annotations
 
 import argparse
+import sys
 import time
 
 import numpy as np
@@ -49,7 +50,7 @@ def embed_snapshot(snapshot: str, limit: int | None = None, force: bool = False)
         df["text_for_embed"].fillna("").tolist(),
         batch_size=S.EMBED_BATCH,
         normalize_embeddings=True,      # 之後全部用內積當 cosine
-        show_progress_bar=True,
+        show_progress_bar=sys.stderr.isatty(),   # 導向檔案時進度條會把 log 洗成一片亂碼
         convert_to_numpy=True,
     ).astype(np.float32)
 

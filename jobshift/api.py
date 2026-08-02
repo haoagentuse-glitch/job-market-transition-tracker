@@ -24,7 +24,11 @@ app = FastAPI(
 
 def q(sql: str, params: list | None = None) -> list[dict]:
     with db.connect(read_only=True) as con:
-        return con.execute(sql, params or []).df().to_dict(orient="records")
+        out = con.execute(sql, params or []).df()
+    # NaN / inf 不是合法 JSON（除以零的成長率、沒有樣本的中位數都會產生），
+    # 一律轉成 null。不在這裡擋，任何一個端點碰到就是 500。
+    out = out.replace([np.inf, -np.inf], np.nan)
+    return out.astype(object).where(pd.notna(out), None).to_dict(orient="records")
 
 
 def snapshots() -> list[str]:
@@ -177,6 +181,16 @@ def cluster_flow(from_snapshot: str | None = None, to_snapshot: str | None = Non
     if not include_self:
         sql += " AND f.kind <> 'stayed'"
     return q(sql + " ORDER BY f.n DESC", [frm, to, min_n])
+
+
+@app.get("/stability")
+def stability(from_snapshot: str | None = None, to_snapshot: str | None = None):
+    """指派方法的雜訊底線。存活職缺的描述兩期不變，所以把它們重新指派一次，
+    不一致的比例就是本方法的量測誤差 —— 其他變化要大過這個數字才算數。"""
+    frm, to = resolve_pair(from_snapshot, to_snapshot)
+    rows = q("SELECT * FROM assignment_stability WHERE from_snapshot = ? AND to_snapshot = ?",
+             [frm, to])
+    return rows[0] if rows else {}
 
 
 @app.get("/survival")

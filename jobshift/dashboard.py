@@ -95,6 +95,9 @@ with tabs[0]:
     if not ind.empty:
         fig = px.line(ind, x="snapshot_date", y="share", color="industry_bucket",
                       markers=True, labels={"share": "佔比", "snapshot_date": ""})
+        # 快照是離散事件，不是連續時間軸；不鎖成類別軸，Plotly 會把日期字串
+        # 當時間戳解析並在兩點之間生出無意義的毫秒刻度。
+        fig.update_xaxes(type="category")
         fig.update_layout(height=520, yaxis_tickformat=".1%", legend_title=None)
         st.plotly_chart(fig, use_container_width=True)
 
@@ -137,6 +140,7 @@ with tabs[1]:
             if not ser.empty:
                 fig = px.line(ser, x="snapshot_date", y="share", color="label", markers=True,
                               labels={"share": "佔比", "snapshot_date": ""})
+                fig.update_xaxes(type="category")
                 fig.update_layout(height=460, yaxis_tickformat=".2%", legend_title=None)
                 st.plotly_chart(fig, use_container_width=True)
 
@@ -157,11 +161,22 @@ with tabs[1]:
 # ── 遷移矩陣 ───────────────────────────────────────────────────────
 with tabs[2]:
     st.caption(
-        "存活職缺的「前期群集 → 後期群集」流向。同一則職缺描述不變，所以絕大多數是自環；"
-        "**離開自環的才是真的被重新定位**。兩端接上「下架」與「新進」，流量才守恆。")
-    only_moved = st.checkbox("只看換了群集的（隱藏自環）", value=True)
+        "職缺在兩期之間的流量。**存活職缺直接繼承前期的群集編號**（描述沒變、向量也沒變，"
+        "重新指派只會引入抖動），所以真正有訊號的是「哪些群集在流失」與「新職缺流進哪裡」。")
+
+    stab = get("/stability", from_snapshot=FRM, to_snapshot=TO)
+    if stab:
+        c1, c2 = st.columns([1, 3])
+        c1.metric("指派雜訊底線", f"{stab.get('noise_floor', 0):.1%}")
+        c2.caption(
+            f"把 {int(stab.get('n_comparable', 0)):,} 筆存活職缺重新指派一次，"
+            f"與繼承結果的一致率是 {stab.get('agreement', 0):.1%}。"
+            "這些職缺的描述兩期完全沒變，所以不一致的部分純粹是方法的量測誤差 —— "
+            "下面任何變化要大過這個數字才值得解讀。")
+
+    hide_self = st.checkbox("隱藏存活的自環，只看下架與新進", value=True)
     fl = df("/cluster-flow", from_snapshot=FRM, to_snapshot=TO,
-            min_n=5, include_self=not only_moved)
+            min_n=5, include_self=not hide_self)
     if fl.empty:
         st.warning("這個區間沒有符合條件的流向。")
     else:

@@ -86,7 +86,6 @@ def fit_reference(vecs: np.ndarray) -> tuple[np.ndarray, dict]:
         min_dist=0.0,
         metric="cosine",
         random_state=42,
-        verbose=True,
     ).fit_transform(low)
 
     min_size = max(25, int(n * S.HDBSCAN_MIN_FRAC))
@@ -269,9 +268,10 @@ def pairwise(prev: str, cur: str, a: pd.DataFrame, b: pd.DataFrame,
             "to_cluster": int(fn.mode().iloc[0]) if len(fn) else -1,
         })
 
-    moved = int(flow.loc[flow.kind == "moved", "n"].sum())
+    gone_n = int(flow.loc[flow.kind == "gone", "n"].sum())
+    added_n = int(flow.loc[flow.kind == "added", "n"].sum())
     print(f"[analyze] {prev} → {cur}：存活 {len(kept)}/{len(ids_a)} "
-          f"（{len(kept) / max(len(ids_a), 1):.1%}），其中 {moved} 筆換群；"
+          f"（{len(kept) / max(len(ids_a), 1):.1%}）、下架 {gone_n}、新進 {added_n}；"
           f"公司位移樣本 {len(shift)} 家")
     return {"survival": pd.DataFrame(surv), "cluster_flow": flow,
             "company_shift": pd.DataFrame(shift)}
@@ -312,10 +312,33 @@ def main() -> None:
         S.REFERENCE_SNAPSHOT: (ref_meta.assign(cluster_id=ref_labels, sim=1.0), ref_vecs)
     }
 
-    for snap in snaps[1:]:
+    stability: list[dict] = []
+    for i, snap in enumerate(snaps[1:], start=1):
         print(f"\n[analyze] === {snap} ===")
         meta, vecs = load(snap)
         lab, sim = assign_by_knn(vecs, pool_vecs, pool_labels)
+
+        # 存活職缺直接繼承上一期的群集編號，不重新指派。
+        # 理由：同一則職缺的描述兩期通常一模一樣，向量也一樣 —— 它「換群」只可能是
+        # 指派方法的抖動（參考期標籤來自 HDBSCAN，新期來自 kNN 投票，兩套機制對同一個點
+        # 可以給不同答案），不是市場的變化。不繼承的話遷移矩陣會被這種假訊號灌滿。
+        prev = snaps[i - 1]
+        prev_lab = assigned[prev][0].set_index("job_id").cluster_id
+        surv = meta.job_id.isin(prev_lab.index).to_numpy()
+        if surv.any():
+            inherited = prev_lab.reindex(meta.job_id[surv]).to_numpy()
+            # 繼承之前先量一次「重新指派會有多少不一致」—— 這就是本方法的雜訊底線，
+            # 拿它當誤差棒，才知道別的變化有沒有超出雜訊。
+            both = (lab[surv] != -1) & (inherited != -1)
+            agree = float((lab[surv][both] == inherited[both]).mean()) if both.any() else np.nan
+            stability.append({
+                "from_snapshot": prev, "to_snapshot": snap,
+                "n_survivors": int(surv.sum()), "n_comparable": int(both.sum()),
+                "agreement": agree, "noise_floor": 1 - agree,
+            })
+            print(f"[analyze]   指派穩定度：存活 {surv.sum()} 筆中可比較 {both.sum()} 筆，"
+                  f"重新指派一致率 {agree:.1%}（＝雜訊底線 {1 - agree:.1%}）")
+            lab[surv] = inherited
 
         # 指派不進去的 → 獨立分群 → 成為新群集 → 併回參考池，下一期就能比對到
         idx = np.where(lab == -1)[0]
@@ -393,6 +416,7 @@ def main() -> None:
         for key, frames in pairs.items():
             db.replace_table(con, key, pd.concat(frames, ignore_index=True)
                              if frames else pd.DataFrame())
+        db.replace_table(con, "assignment_stability", pd.DataFrame(stability))
         db.replace_table(con, "analysis_meta", meta_rows)
 
     print(f"\n[analyze] 完成。快照 {len(snaps)} 份、群集 {len(catalog)} 個"
