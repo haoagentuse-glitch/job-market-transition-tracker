@@ -56,13 +56,25 @@ PAGE_SIZE = 30                                   # API pagination.limit
 MAX_PAGES = int(os.getenv("CRAWL_MAX_PAGES", "150"))   # 150 × 30 = 4500／類，同舊上限
 TARGET_PER_CATEGORY = 4500
 
-# 不併發：一次一個請求，每個請求之間固定間隔 3 秒（約 0.33 req/s）。
-# 這是舊版爬蟲用過、確實抓完 6.5 萬筆而沒被擋的速率，是唯一有證據支持安全的。
-# 實測反例：併發 4 ＋ 1 秒延遲（約 1 req/s）在約 70 個請求後就被整站封鎖 IP，
-# 連首頁 HTML 都回 403。不要調高這兩個值。
-CRAWL_CONCURRENCY = int(os.getenv("CRAWL_CONCURRENCY", "1"))
-CRAWL_DELAY = float(os.getenv("CRAWL_DELAY", "3.0"))
-# 連續這麼多個 403 就中止整場爬取：被擋之後繼續打只會延長封鎖，而且一筆都拿不到。
+# ── 節流：完全照抄前一版專案，那是唯一有證據不被封鎖的設定 ──────────
+#
+# 前一版是三層巢狀節流（launcher → crawl_single → crawler），總時長約 2.5–3 小時，
+# 抓完 6.5 萬筆從未被擋。關鍵不只是「慢」，是**大量停頓**：類別之間停 2–3 分鐘，
+# 流量是一陣一陣的，不是持續穩定的。
+#
+# 實測反例（2026-08-02）：Scrapy 併發 4 ＋ 1 秒延遲，約 70 個請求後整站封鎖 IP，
+# 連首頁 HTML 都回 403；降到序列 ＋ 3 秒連續請求，14 個請求後仍被擋。
+# 這三組數字不要調小。
+SLEEP_PAGE_MIN = float(os.getenv("CRAWL_SLEEP_PAGE_MIN", "2.2"))       # 每頁之間
+SLEEP_PAGE_MAX = float(os.getenv("CRAWL_SLEEP_PAGE_MAX", "3.0"))
+SLEEP_RUN_MIN = float(os.getenv("CRAWL_SLEEP_RUN_MIN", "45"))          # 每輪之間
+SLEEP_RUN_MAX = float(os.getenv("CRAWL_SLEEP_RUN_MAX", "90"))
+SLEEP_CATEGORY_MIN = float(os.getenv("CRAWL_SLEEP_CAT_MIN", "120"))    # 每類別之間
+SLEEP_CATEGORY_MAX = float(os.getenv("CRAWL_SLEEP_CAT_MAX", "180"))
+
+MAX_RUNS_PER_CATEGORY = int(os.getenv("CRAWL_MAX_RUNS", "2"))
+CRAWL_MAX_RETRIES = int(os.getenv("CRAWL_MAX_RETRIES", "3"))
+# 連續這麼多個 403/429 就中止整場：被擋之後繼續打只會延長封鎖，而且一筆都拿不到。
 CRAWL_ABORT_AFTER_403 = int(os.getenv("CRAWL_ABORT_AFTER_403", "5"))
 
 # ── 產業分類（20 桶，沿用舊定義，保留為分析維度）────────────────────

@@ -6,8 +6,9 @@ readme = "README.md"
 requires-python = ">=3.12,<3.13"
 
 dependencies = [
-    # 爬取
-    "scrapy>=2.12,<3",
+    # 爬取。刻意不用 Scrapy：實測它的連續請求模式會被來源站封鎖 IP，
+    # 而前一版的 requests 序列＋三層節流抓完 6.5 萬筆從未被擋。詳見 crawler.py 檔頭。
+    "requests>=2.32,<3",
     # 資料處理 / 儲存
     "pandas>=2.2,<3",
     "numpy>=1.26,<2.2",          # 上限來自 numba/umap-learn

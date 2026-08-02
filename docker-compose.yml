@@ -32,10 +32,15 @@ services:
     environment:
       - JOBSHIFT_DATA_DIR=/data
       - JOBSHIFT_SNAPSHOT_DATE
-      - CRAWL_CONCURRENCY
-      - CRAWL_DELAY
       - CRAWL_MAX_PAGES
       - CRAWL_ABORT_AFTER_403
+      - CRAWL_SLEEP_PAGE_MIN
+      - CRAWL_SLEEP_PAGE_MAX
+      - CRAWL_SLEEP_RUN_MIN
+      - CRAWL_SLEEP_RUN_MAX
+      - CRAWL_SLEEP_CAT_MIN
+      - CRAWL_SLEEP_CAT_MAX
+      - CRAWL_MAX_RUNS
     command: python -m jobshift.pipeline
 
   # ── 單獨跑某個階段：debug 或只想重算分析時用 ────────────────────────
@@ -46,11 +51,16 @@ services:
     environment:
       - JOBSHIFT_DATA_DIR=/data
       - JOBSHIFT_SNAPSHOT_DATE
-      - CRAWL_CONCURRENCY
-      - CRAWL_DELAY
       - CRAWL_MAX_PAGES
       - CRAWL_ABORT_AFTER_403
-    command: python -m jobshift.spider
+      - CRAWL_SLEEP_PAGE_MIN
+      - CRAWL_SLEEP_PAGE_MAX
+      - CRAWL_SLEEP_RUN_MIN
+      - CRAWL_SLEEP_RUN_MAX
+      - CRAWL_SLEEP_CAT_MIN
+      - CRAWL_SLEEP_CAT_MAX
+      - CRAWL_MAX_RUNS
+    command: python -m jobshift.crawler
 
   ingest:                    # 短任務：原始資料 → 清洗 → DuckDB
     <<: *base
