@@ -24,6 +24,7 @@ from __future__ import annotations
 import argparse
 import itertools
 import json
+import re
 
 import numpy as np
 import pandas as pd
@@ -141,6 +142,27 @@ def discover(vecs: np.ndarray, min_frac: float = 0.02) -> np.ndarray:
 
 
 # ── 群集命名：不用斷詞，全靠 embedding + 字元 n-gram ─────────────────
+_BRACKETS = re.compile(r"[（(【\[［].{0,40}?[）)】\]］]")
+_LEAD = re.compile(r"^[\s\W_]+")
+_SPLIT = re.compile(r"[/|｜・‧,，、~～]|[-–—](?=\S)")
+_TAIL = re.compile(r"[\s\W_]+$")
+
+
+def _clean_label(title: str) -> str:
+    """群集名稱只保留職稱本體。
+
+    職缺標題常夾帶招募話術：括號內的「免打卡」「百萬年薪不是夢」、
+    前綴的符號、以及分隔符之後的「福利健全/完整培訓/獎金制」。
+    取第一個分隔段即為職稱本身。完整原文保留在 top_titles 欄，
+    這裡只是讓標籤在圖表軸上讀得下去。
+    """
+    s = _BRACKETS.sub("", title or "")
+    s = _LEAD.sub("", s)
+    parts = [p.strip() for p in _SPLIT.split(s) if p.strip()]
+    s = next((p for p in parts if len(p) >= 2), s).strip()
+    return _TAIL.sub("", s)[:16]
+
+
 def label_clusters(meta: pd.DataFrame, vecs: np.ndarray, labels: np.ndarray,
                    kind: str) -> pd.DataFrame:
     titles = np.array(meta["job_title"].fillna("").tolist())
@@ -162,6 +184,15 @@ def label_clusters(meta: pd.DataFrame, vecs: np.ndarray, labels: np.ndarray,
         center /= max(np.linalg.norm(center), 1e-9)
         top = np.argsort(-(vecs[mask] @ center))[:8]
         names = pd.Series(titles[mask][top]).drop_duplicates()
+
+        # 群集名稱取群內出現次數最多的職稱，不取離群心最近的那一個。
+        # 最近的常常是促銷型標題（「百萬年薪不是夢,工作中玩樂,玩樂中賺錢」），
+        # 放在對外介面上不堪用；重複出現的才是這群工作的通稱。
+        freq = pd.Series(titles[mask]).value_counts()
+        canonical = freq.index[0] if len(freq) and freq.iloc[0] > 1 else None
+        if canonical is None:      # 全部都只出現一次，退而取最短的候選
+            canonical = min(names, key=len) if len(names) else f"群 {cid}"
+        canonical = _clean_label(canonical) or f"群 {cid}"
         # 鑑別詞：該群 tfidf 均值減全域均值，取最突出的字元 n-gram
         c_mean = np.asarray(X[mask].mean(axis=0)).ravel()
         terms = [t.strip() for t in vocab[np.argsort(-(c_mean - global_mean))[:12]]
@@ -169,7 +200,7 @@ def label_clusters(meta: pd.DataFrame, vecs: np.ndarray, labels: np.ndarray,
         rows.append({
             "cluster_id": int(cid),
             "kind": kind,
-            "label": names.iloc[0] if len(names) else f"群 {cid}",
+            "label": canonical,
             "top_titles": " / ".join(names.head(5)),
             "top_terms": " ".join(terms),
         })
@@ -309,7 +340,14 @@ def main() -> None:
     if cached:
         ref_labels = (ref_labels_df.set_index("job_id").cluster_id
                       .reindex(ref_meta.job_id).to_numpy())
-        info = {"method": "cached", "noise_ratio": float((ref_labels == -1).mean()),
+        # 沿用時要把「當初實際用的方法」讀回來。寫成 "cached" 會讓對外介面顯示
+        # 內部狀態字串，而不是這組群集真正是怎麼來的。
+        with db.connect(read_only=True) as con:
+            prev = con.execute(
+                "SELECT value FROM analysis_meta WHERE key = 'cluster_method'"
+            ).fetchall() if db.table_exists(con, "analysis_meta") else []
+        info = {"method": prev[0][0] if prev else "hdbscan",
+                "noise_ratio": float((ref_labels == -1).mean()),
                 "n_reference_clusters": int(len(set(ref_labels)) - 1)}
         print(f"[analyze] 沿用既有參考座標系（{info['n_reference_clusters']} 群）"
               "；要重建請加 --refit")

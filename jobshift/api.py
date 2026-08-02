@@ -39,11 +39,28 @@ def snapshots() -> list[str]:
 
 
 def resolve_pair(frm: str | None, to: str | None) -> tuple[str, str]:
-    """沒指定就用時間軸最後相鄰的兩期。"""
+    """沒指定就用時間軸最後相鄰的兩期。只有一份快照時兩端都指向它 ——
+    群集規模等單期指標照樣算得出來，跨期差額為零。"""
     snaps = snapshots()
-    if len(snaps) < 2:
-        raise HTTPException(503, "只有一份快照，還沒有跨期可比。再跑一次 pipeline。")
+    if not snaps:
+        raise HTTPException(503, "分析尚未執行")
+    if len(snaps) == 1:
+        return snaps[0], snaps[0]
     return frm or snaps[-2], to or snaps[-1]
+
+
+def q_if_exists(table: str, sql: str, params: list) -> list[dict]:
+    """跨期的表在只有一份快照時不存在，回空清單而不是 500。
+
+    刻意先查存在性，不靠捕捉例外：DuckDB 的 replacement scan 在找不到資料表時
+    會去呼叫端的 Python 命名空間找同名物件，而本模組的路由函式就叫 survival、
+    company_shift、cluster_flow —— 跟資料表同名。那樣拿到的錯誤是
+    「找到 function，不適用於 replacement scan」，用字串比對接會漏掉。
+    """
+    with db.connect(read_only=True) as con:
+        if not db.table_exists(con, table):
+            return []
+    return q(sql, params)
 
 
 @lru_cache(maxsize=8)
@@ -203,7 +220,7 @@ def cluster_flow(from_snapshot: str | None = None, to_snapshot: str | None = Non
     """
     if not include_self:
         sql += " AND f.kind <> 'stayed'"
-    return q(sql + " ORDER BY f.n DESC", [frm, to, min_n])
+    return q_if_exists("cluster_flow", sql + " ORDER BY f.n DESC", [frm, to, min_n])
 
 
 @app.get("/stability")
@@ -211,8 +228,10 @@ def stability(from_snapshot: str | None = None, to_snapshot: str | None = None):
     """指派方法的雜訊底線。存活職缺的描述兩期不變，所以把它們重新指派一次，
     不一致的比例就是本方法的量測誤差 —— 其他變化要大過這個數字才算數。"""
     frm, to = resolve_pair(from_snapshot, to_snapshot)
-    rows = q("SELECT * FROM assignment_stability WHERE from_snapshot = ? AND to_snapshot = ?",
-             [frm, to])
+    rows = q_if_exists(
+        "assignment_stability",
+        "SELECT * FROM assignment_stability WHERE from_snapshot = ? AND to_snapshot = ?",
+        [frm, to])
     return rows[0] if rows else {}
 
 
@@ -221,15 +240,17 @@ def survival(from_snapshot: str | None = None, to_snapshot: str | None = None,
              dimension: str = "行業大類"):
     frm, to = resolve_pair(from_snapshot, to_snapshot)
     dim_col(dimension)
-    return q("SELECT * FROM survival WHERE from_snapshot = ? AND to_snapshot = ? "
-             "AND dimension = ? ORDER BY churn_rate DESC", [frm, to, dimension])
+    return q_if_exists(
+        "survival",
+        "SELECT * FROM survival WHERE from_snapshot = ? AND to_snapshot = ? "
+        "AND dimension = ? ORDER BY churn_rate DESC", [frm, to, dimension])
 
 
 @app.get("/company-shift")
 def company_shift(from_snapshot: str | None = None, to_snapshot: str | None = None,
                   limit: int = Query(200, le=2000), min_jobs: int = 3):
     frm, to = resolve_pair(from_snapshot, to_snapshot)
-    return q("""
+    return q_if_exists("company_shift", """
         SELECT s.*, cf.label AS from_label, ct.label AS to_label
         FROM company_shift s
         LEFT JOIN clusters cf ON cf.cluster_id = s.from_cluster
@@ -251,6 +272,88 @@ def industry_composition(snapshot: str | None = None, min_n: int = 20,
         sql += " AND f.snapshot_date = ?"
         params.append(snapshot)
     return q(sql + " ORDER BY f.n DESC", params)
+
+
+# ── 技能概念 ───────────────────────────────────────────────────────
+@app.get("/concepts")
+def concept_list():
+    return q("SELECT * FROM concept_summary ORDER BY n DESC")
+
+
+@app.get("/concepts/meta")
+def concept_meta():
+    return {r["key"]: r["value"] for r in q("SELECT key, value FROM concept_meta")}
+
+
+@app.get("/concepts/cross")
+def concept_cross(dimension: str = "職務類別", min_n: int = 1):
+    """概念 × 分類維度的交叉分布。share_in_concept 用來看某概念集中在哪，
+    share_in_category 用來看某類別裡有多少比例沾到這個概念。"""
+    col = dim_col(dimension)
+    return q(f"""
+        WITH hit AS (
+            SELECT s.concept, j.{col} AS category, count(*) AS n
+            FROM concept_scores s
+            JOIN jobs j ON j.job_id = s.job_id AND j.snapshot_date = ?
+            GROUP BY 1, 2
+        ),
+        total AS (SELECT {col} AS category, count(*) AS n_category
+                  FROM jobs WHERE snapshot_date = ? GROUP BY 1)
+        SELECT h.concept, h.category, h.n, t.n_category,
+               h.n::DOUBLE / sum(h.n) OVER (PARTITION BY h.concept) AS share_in_concept,
+               h.n::DOUBLE / t.n_category AS share_in_category
+        FROM hit h JOIN total t USING (category)
+        WHERE h.n >= ? ORDER BY h.concept, h.n DESC
+    """, [S.REFERENCE_SNAPSHOT, S.REFERENCE_SNAPSHOT, min_n])
+
+
+@app.get("/concepts/examples")
+def concept_examples(concept: str | None = None):
+    sql = "SELECT * FROM concept_examples"
+    params: list = []
+    if concept:
+        sql += " WHERE concept = ?"
+        params.append(concept)
+    return q(sql + " ORDER BY concept, anchor_similarity DESC", params)
+
+
+@app.get("/concepts/candidates")
+def concept_candidates(concept: str | None = None):
+    """關鍵字未命中、但錨點相似度最高者。標記為待驗證，不計入任何統計。"""
+    sql = "SELECT * FROM concept_candidates"
+    params: list = []
+    if concept:
+        sql += " WHERE concept = ?"
+        params.append(concept)
+    return q(sql + " ORDER BY concept, anchor_similarity DESC", params)
+
+
+@app.get("/concepts/jobs")
+def concept_jobs(concept: str, limit: int = Query(100, le=1000)):
+    return q("""
+        SELECT j.job_id, j.job_title, j.company_name, j.bucket_label, j.industry_class,
+               j.city_name, j.salary_month_min, j.job_url, s.anchor_similarity
+        FROM concept_scores s
+        JOIN jobs j ON j.job_id = s.job_id AND j.snapshot_date = ?
+        WHERE s.concept = ?
+        ORDER BY s.anchor_similarity DESC LIMIT ?
+    """, [S.REFERENCE_SNAPSHOT, concept, limit])
+
+
+@app.get("/concepts/salary")
+def concept_salary():
+    """各概念的薪資分位數，對照全體。"""
+    return q("""
+        SELECT s.concept,
+               count(*) AS n,
+               median(j.salary_month_min) AS p50,
+               quantile_cont(j.salary_month_min, 0.25) AS p25,
+               quantile_cont(j.salary_month_min, 0.75) AS p75
+        FROM concept_scores s
+        JOIN jobs j ON j.job_id = s.job_id AND j.snapshot_date = ?
+        WHERE j.salary_month_min IS NOT NULL
+        GROUP BY 1 ORDER BY p50 DESC
+    """, [S.REFERENCE_SNAPSHOT])
 
 
 # ── 向量檢索 ───────────────────────────────────────────────────────

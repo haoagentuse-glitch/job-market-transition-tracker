@@ -16,7 +16,15 @@ def table_exists(con: duckdb.DuckDBPyConnection, name: str) -> bool:
 
 
 def replace_table(con: duckdb.DuckDBPyConnection, name: str, df) -> None:
-    """整表覆寫。這個專案的表都是「重算即重建」，沒有增量更新的必要。"""
+    """整表覆寫。這個專案的表都是「重算即重建」，沒有增量更新的必要。
+
+    零欄位的 DataFrame 要當成「這張表不該存在」處理。直接建會拋
+    Binder Error，而且會讓同一個區塊後面的寫入全部沒跑到 —— 實際踩過：
+    只有一份快照時跨期的表都是空的，結果 analysis_meta 從沒被寫入。
+    """
+    if getattr(df, "empty", False) and len(getattr(df, "columns", [])) == 0:
+        con.execute(f"DROP TABLE IF EXISTS {name}")
+        return
     con.register("_tmp_df", df)
     con.execute(f"CREATE OR REPLACE TABLE {name} AS SELECT * FROM _tmp_df")
     con.unregister("_tmp_df")

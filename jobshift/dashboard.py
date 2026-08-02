@@ -1,4 +1,4 @@
-"""Streamlit 儀表板。只呼叫 API，不碰 DuckDB —— 查詢邏輯只有一份，在 api.py。"""
+"""Streamlit 儀表板。只呼叫 API，不直接接 DuckDB —— 查詢邏輯只有一份。"""
 
 from __future__ import annotations
 
@@ -7,22 +7,18 @@ import os
 import httpx
 import pandas as pd
 import plotly.express as px
-import plotly.graph_objects as go
 import streamlit as st
 
 API = os.getenv("JOBSHIFT_API", "http://localhost:8000")
 
-# initial_sidebar_state 一定要寫死 expanded：比較區間與分類維度這兩個主要控制項
-# 都在側邊欄，預設的 auto 在較窄視窗會把它收起來（而且是整個從 DOM 卸載），
-# 使用者一打開會以為沒有這些選項。
-st.set_page_config(page_title="職缺結構遷移", page_icon="📊", layout="wide",
+st.set_page_config(page_title="台灣職缺語意結構分析", page_icon="◧", layout="wide",
                    initial_sidebar_state="expanded")
 
 
 @st.cache_data(ttl=300)
 def get(path: str, **params) -> list | dict:
-    r = httpx.get(f"{API}{path}", params={k: v for k, v in params.items() if v is not None},
-                  timeout=60)
+    r = httpx.get(f"{API}{path}",
+                  params={k: v for k, v in params.items() if v is not None}, timeout=60)
     r.raise_for_status()
     return r.json()
 
@@ -31,263 +27,226 @@ def df(path: str, **params) -> pd.DataFrame:
     return pd.DataFrame(get(path, **params))
 
 
+def money(v) -> str:
+    return f"{int(v):,}" if pd.notna(v) else "—"
+
+
 try:
     META = get("/meta")
+    CMETA = get("/concepts/meta")
 except Exception as exc:
-    st.error(f"連不上 API（{API}）或分析尚未執行：{exc}")
-    st.info("跑一次 `docker compose run --rm pipeline` 之後再回來。")
+    st.error(f"API 無回應（{API}）：{exc}")
     st.stop()
 
-SNAPS: list[str] = META.get("snapshots", [])
+SNAP = META.get("reference_snapshot", "?")
+N_JOBS = int(CMETA.get("n_jobs", 0))
+N_AI = int(CMETA.get("n_ai_jobs", 0))
 
-# ── 側邊欄：時間軸與比較區間 ────────────────────────────────────────
 with st.sidebar:
-    st.header("比較區間")
-    if len(SNAPS) < 2:
-        st.warning("目前只有一份快照，跨期分析要等下一次 pipeline 跑完。")
-        FRM = TO = SNAPS[0] if SNAPS else "?"
-    else:
-        TO = st.selectbox("後期", SNAPS[::-1], index=0)
-        earlier = [s for s in SNAPS if s < TO] or [SNAPS[0]]
-        FRM = st.selectbox("前期", earlier[::-1], index=len(earlier) - 1)
+    st.subheader("資料")
+    st.write(f"快照　{SNAP}")
+    st.write(f"職缺　{N_JOBS:,}")
+    st.write("來源　1111 人力銀行")
     st.divider()
-    st.caption("**時間軸**")
-    for s in SNAPS:
-        st.caption(f"{'🔹' if s in (FRM, TO) else '▫️'} {s}"
-                   + ("　←參考座標系" if s == META.get("reference_snapshot") else ""))
+    st.subheader("方法")
+    st.write("嵌入　bge-m3 · 1024 維")
+    st.write(f"分群　{META.get('cluster_method')}")
+    st.write(f"群集　{META.get('n_reference_clusters')}")
+    st.write(f"噪點　{float(META.get('noise_ratio', 0)):.1%}")
     st.divider()
-    st.header("分類維度")
-    DIMS = get("/dimensions")
-    DIM = st.radio("依什麼切分", [d["key"] for d in DIMS], index=1,
-                   help="兩套分類量的是不同東西，切換看看結論穩不穩。")
-    _d = next(d for d in DIMS if d["key"] == DIM)
-    st.caption(f"來源：{_d['source']}\n\n⚠️ {_d['caveat']}")
+    DIM = st.radio("分類維度", ["行業大類", "職務類別"], index=0)
 
-    st.divider()
-    st.caption(
-        f"分群 `{META.get('cluster_method')}`\n\n"
-        f"參考群集 {META.get('n_reference_clusters')} 個，"
-        f"含新生共 {META.get('n_clusters_total')} 個\n\n"
-        f"噪點率 {float(META.get('noise_ratio', 0)):.1%}"
-    )
+st.title("台灣職缺的語意結構")
+st.caption(f"{SNAP} · {N_JOBS:,} 筆 · 以職缺描述的語意向量建立分類，不採用平台既有標籤")
 
-st.title("職缺市場的結構遷移")
-st.caption(f"比較區間：**{FRM}** → **{TO}**　|　語意座標系建在 "
-           f"**{META.get('reference_snapshot')}**，之後每份快照都指派進同一組群集，"
-           "所以編號跨期一致。")
+tabs = st.tabs(["市場全景", "數位職缺", "AI 技能", "薪資", "方法與限制"])
 
-if len(SNAPS) == 2:
-    st.info(
-        "**目前只有兩個觀測點，這是對照不是趨勢。** 任何「持續上升／下降」的說法都還不成立，"
-        "要第三份快照之後才談得上趨勢。另外各期都套用每產業 4,500 筆的相同上限，"
-        "熱門產業的絕對數是被截斷的 —— 看佔比比看總數可靠。",
-        icon="⚠️",
-    )
-
-tabs = st.tabs(["時間軸", "語意群集", "遷移矩陣", "產業組成", "公司招募位移", "相似職缺"])
-
-# ── 時間軸 ─────────────────────────────────────────────────────────
+# ── 市場全景 ───────────────────────────────────────────────────────
 with tabs[0]:
+    cl = df("/clusters")
+    if cl.empty:
+        st.warning("尚未執行分群")
+    else:
+        c1, c2, c3 = st.columns(3)
+        c1.metric("語意群集", len(cl))
+        c2.metric("最大群集佔比", f"{cl.share_to.max():.1%}")
+        c3.metric("前十群集合計", f"{cl.nlargest(10, 'share_to').share_to.sum():.1%}")
+
+        top = cl.nlargest(25, "n_to")
+        fig = px.bar(top.sort_values("n_to"), x="n_to", y="label", orientation="h",
+                     hover_data=["top_titles"], labels={"n_to": "職缺數", "label": ""})
+        fig.update_layout(height=680, margin={"l": 0, "r": 0, "t": 10, "b": 0})
+        st.plotly_chart(fig, use_container_width=True)
+
+        st.dataframe(
+            cl[["cluster_id", "label", "top_titles", "top_terms", "n_to", "share_to"]]
+            .sort_values("n_to", ascending=False),
+            column_config={
+                "cluster_id": "群集", "label": "代表職稱", "top_titles": "鄰近職稱",
+                "top_terms": "鑑別詞", "n_to": st.column_config.NumberColumn("職缺數", format="%d"),
+                "share_to": st.column_config.NumberColumn("佔比", format="%.2f%%"),
+            },
+            use_container_width=True, hide_index=True, height=420)
+
+        ids = cl.set_index("cluster_id").label.to_dict()
+        cid = st.selectbox("檢視群集內職缺", cl.cluster_id.tolist(),
+                           format_func=lambda i: f"{i}　{ids.get(i, '')}")
+        st.dataframe(df(f"/clusters/{cid}/jobs", limit=50),
+                     use_container_width=True, hide_index=True)
+
+# ── 數位職缺 ───────────────────────────────────────────────────────
+with tabs[1]:
+    cs = df("/concepts")
+    if cs.empty:
+        st.warning("尚未執行技能分析")
+        st.stop()
+
+    c1, c2 = st.columns(2)
+    c1.metric("數位技能職缺", f"{int(CMETA.get('n_digital_jobs', 0)):,}")
+    c2.metric("佔全體", f"{int(CMETA.get('n_digital_jobs', 0)) / N_JOBS:.2%}")
+
+    st.dataframe(
+        cs[["concept", "n", "share", "median_salary", "salary_premium",
+            "median_desc_len"]],
+        column_config={
+            "concept": "技能概念",
+            "n": st.column_config.NumberColumn("職缺數", format="%d"),
+            "share": st.column_config.NumberColumn("佔全體", format="%.2f%%"),
+            "median_salary": st.column_config.NumberColumn("月薪中位", format="%d"),
+            "salary_premium": st.column_config.NumberColumn("對全體倍數", format="%.2f"),
+            "median_desc_len": st.column_config.NumberColumn("描述字數中位", format="%d"),
+        },
+        use_container_width=True, hide_index=True)
+
+    cross = df("/concepts/cross", dimension=DIM, min_n=5)
+    if not cross.empty:
+        st.subheader(f"技能概念在{DIM}中的分布")
+        piv = cross.pivot_table(index="category", columns="concept",
+                                values="share_in_category", fill_value=0)
+        fig = px.imshow(piv * 100, aspect="auto", color_continuous_scale="Blues",
+                        labels={"color": "%"})
+        fig.update_layout(height=520, margin={"l": 0, "r": 0, "t": 10, "b": 0},
+                          xaxis_title=None, yaxis_title=None)
+        st.plotly_chart(fig, use_container_width=True)
+        st.caption("數值為該類別中具備此技能的職缺比例。技能不受職務分類限制，"
+                   "同一概念會橫跨多個類別。")
+
+        pick = st.selectbox("概念集中於哪些類別", sorted(cross.concept.unique()))
+        sub = cross[cross.concept == pick].nlargest(15, "n")
+        fig = px.bar(sub.sort_values("n"), x="n", y="category", orientation="h",
+                     labels={"n": "職缺數", "category": ""})
+        fig.update_layout(height=420, margin={"l": 0, "r": 0, "t": 10, "b": 0})
+        st.plotly_chart(fig, use_container_width=True)
+
+# ── AI 技能 ────────────────────────────────────────────────────────
+with tabs[2]:
+    ai = cs[cs.is_ai]
+    c1, c2, c3 = st.columns(3)
+    c1.metric("AI 技能職缺", f"{N_AI:,}")
+    c2.metric("佔全體", f"{N_AI / N_JOBS:.2%}")
+    prem = ai.salary_premium.mean()
+    c3.metric("月薪相對全體", f"{prem:.2f}×" if pd.notna(prem) else "—")
+
+    st.dataframe(
+        ai[["concept", "n", "share", "median_salary", "salary_premium",
+            "median_desc_len"]],
+        column_config={
+            "concept": "概念", "n": st.column_config.NumberColumn("職缺數", format="%d"),
+            "share": st.column_config.NumberColumn("佔全體", format="%.2f%%"),
+            "median_salary": st.column_config.NumberColumn("月薪中位", format="%d"),
+            "salary_premium": st.column_config.NumberColumn("對全體倍數", format="%.2f"),
+            "median_desc_len": st.column_config.NumberColumn("描述字數中位", format="%d"),
+        },
+        use_container_width=True, hide_index=True)
+
+    aic = cross[cross.concept.isin(ai.concept)] if not cross.empty else pd.DataFrame()
+    if not aic.empty:
+        st.subheader(f"AI 技能職缺的{DIM}分布")
+        fig = px.bar(aic.nlargest(20, "n").sort_values("n"), x="n", y="category",
+                     color="concept", orientation="h",
+                     labels={"n": "職缺數", "category": "", "concept": ""})
+        fig.update_layout(height=520, margin={"l": 0, "r": 0, "t": 10, "b": 0},
+                          legend={"orientation": "h", "y": -0.12})
+        st.plotly_chart(fig, use_container_width=True)
+
+    pick_ai = st.selectbox("檢視職缺", ai.concept.tolist())
+    view = st.radio("", ["已認定", "待驗證候選"], horizontal=True,
+                    label_visibility="collapsed")
+    if view == "已認定":
+        st.dataframe(df("/concepts/jobs", concept=pick_ai, limit=200),
+                     use_container_width=True, hide_index=True, height=420)
+    else:
+        st.caption("關鍵字未命中、但語意錨點相似度最高者。錨點相似度的精確率不足以直接採信，"
+                   "此處僅供人工檢視，不計入任何統計。")
+        st.dataframe(df("/concepts/candidates", concept=pick_ai),
+                     use_container_width=True, hide_index=True, height=380)
+
+# ── 薪資 ───────────────────────────────────────────────────────────
+with tabs[3]:
+    sal = df("/concepts/salary")
     tl = df("/timeline")
     if not tl.empty:
-        cols = st.columns(min(len(tl), 4))
-        for i, row in tl.iterrows():
-            with cols[i % len(cols)]:
-                st.metric(f"{row.snapshot_date}", f"{int(row.n):,} 筆")
-                st.caption(
-                    "月薪中位數 "
-                    + (f"{int(row.median_salary):,}" if pd.notna(row.median_salary) else "—")
-                    + f"（涵蓋 {row.salary_coverage:.0%}）\n\n"
-                    f"{int(row.n_companies):,} 家公司"
-                )
-        st.caption("月薪中位數只涵蓋能換算成月薪的職缺；面議與論件計酬沒有可比數字，不計入。")
+        base = tl.iloc[0]
+        c1, c2 = st.columns(2)
+        c1.metric("全體月薪中位", money(base.median_salary))
+        c2.metric("可換算月薪比例", f"{base.salary_coverage:.0%}")
+        st.caption("面議與論件計酬無可比數字，不計入薪資統計。")
 
-    st.subheader(f"{DIM}佔比隨時間")
-    ind = df("/industry-series", dimension=DIM)
-    if not ind.empty:
-        fig = px.line(ind, x="snapshot_date", y="share", color="category",
-                      markers=True, labels={"share": "佔比", "snapshot_date": "",
-                                            "category": DIM})
-        # 快照是離散事件，不是連續時間軸；不鎖成類別軸，Plotly 會把日期字串
-        # 當時間戳解析並在兩點之間生出無意義的毫秒刻度。
-        fig.update_xaxes(type="category")
-        fig.update_layout(height=520, yaxis_tickformat=".1%", legend_title=None)
+    if not sal.empty:
+        fig = px.bar(sal.sort_values("p50"), x="p50", y="concept", orientation="h",
+                     error_x=sal.sort_values("p50").p75 - sal.sort_values("p50").p50,
+                     error_x_minus=sal.sort_values("p50").p50 - sal.sort_values("p50").p25,
+                     labels={"p50": "月薪中位數", "concept": ""})
+        if not tl.empty and pd.notna(tl.iloc[0].median_salary):
+            fig.add_vline(x=float(tl.iloc[0].median_salary), line_dash="dot")
+        fig.update_layout(height=460, margin={"l": 0, "r": 0, "t": 10, "b": 0})
         st.plotly_chart(fig, use_container_width=True)
+        st.caption("誤差線為四分位距。虛線為全體中位數。")
+        st.dataframe(sal, use_container_width=True, hide_index=True,
+                     column_config={"concept": "概念", "n": "樣本數",
+                                    "p25": "P25", "p50": "中位", "p75": "P75"})
 
-    surv = df("/survival", from_snapshot=FRM, to_snapshot=TO, dimension=DIM)
-    if not surv.empty:
-        st.subheader(f"{DIM}汰換率（{FRM} → {TO}）")
-        st.caption("汰換率＝前期職缺到後期已經不在的比例；更新率＝後期裡屬於新出現的比例。")
-        s = surv.sort_values("churn_rate")
-        fig = px.bar(s, x="churn_rate", y="category", orientation="h",
-                     text=s.churn_rate.map("{:.0%}".format),
-                     labels={"churn_rate": "汰換率", "category": DIM})
-        fig.update_layout(height=640, yaxis_title=None, xaxis_tickformat=".0%")
-        st.plotly_chart(fig, use_container_width=True)
-        st.dataframe(surv, use_container_width=True, hide_index=True)
-
-# ── 語意群集 ───────────────────────────────────────────────────────
-with tabs[1]:
-    cl = df("/clusters", from_snapshot=FRM, to_snapshot=TO)
-    if cl.empty:
-        st.warning("clusters 是空的，請先跑 pipeline。")
-    else:
-        pick = st.multiselect("狀態", sorted(cl.status.unique()),
-                              default=sorted(cl.status.unique()))
-        view = cl[cl.status.isin(pick)]
-
-        st.subheader("群集地圖")
-        st.caption("點大小＝後期職缺數；顏色＝佔比變化；對角線以上代表這個語意群在變大。")
-        fig = px.scatter(
-            view, x="share_from", y="share_to", size="n_to", color="share_delta_pp",
-            hover_name="label", hover_data=["top_titles", "n_from", "n_to", "status"],
-            color_continuous_scale="RdBu", color_continuous_midpoint=0, size_max=45,
-            labels={"share_from": f"{FRM} 佔比", "share_to": f"{TO} 佔比"})
-        lim = float(max(view.share_from.max(), view.share_to.max(), 1e-6)) * 1.05
-        fig.add_shape(type="line", x0=0, y0=0, x1=lim, y1=lim, line={"dash": "dot", "width": 1})
-        fig.update_layout(height=560)
-        st.plotly_chart(fig, use_container_width=True)
-
-        if len(SNAPS) > 2:
-            st.subheader("變化最大的群集，完整時間序列")
-            ser = df("/clusters/series", top=12)
-            if not ser.empty:
-                fig = px.line(ser, x="snapshot_date", y="share", color="label", markers=True,
-                              labels={"share": "佔比", "snapshot_date": ""})
-                fig.update_xaxes(type="category")
-                fig.update_layout(height=460, yaxis_tickformat=".2%", legend_title=None)
-                st.plotly_chart(fig, use_container_width=True)
-
-        st.subheader("消長排行")
-        show = ["cluster_id", "status", "label", "top_titles", "top_terms", "first_seen",
-                "n_from", "n_to", "delta", "share_delta_pp", "growth_pct"]
-        st.dataframe(view[[c for c in show if c in view.columns]]
-                     .sort_values("share_delta_pp", ascending=False),
-                     use_container_width=True, hide_index=True, height=440)
-
-        labels = view.set_index("cluster_id").label.to_dict()
-        cid = st.selectbox("看某個群集的實際職缺", view.cluster_id.tolist(),
-                           format_func=lambda i: f"{i} — {labels.get(i, '')}")
-        if cid is not None:
-            st.dataframe(df(f"/clusters/{cid}/jobs", snapshot=TO, limit=50),
-                         use_container_width=True, hide_index=True)
-
-# ── 遷移矩陣 ───────────────────────────────────────────────────────
-with tabs[2]:
-    st.caption(
-        "職缺在兩期之間的流量。**存活職缺直接繼承前期的群集編號**（描述沒變、向量也沒變，"
-        "重新指派只會引入抖動），所以真正有訊號的是「哪些群集在流失」與「新職缺流進哪裡」。")
-
-    stab = get("/stability", from_snapshot=FRM, to_snapshot=TO)
-    if stab:
-        c1, c2 = st.columns([1, 3])
-        c1.metric("指派雜訊底線", f"{stab.get('noise_floor', 0):.1%}")
-        c2.caption(
-            f"把 {int(stab.get('n_comparable', 0)):,} 筆存活職缺重新指派一次，"
-            f"與繼承結果的一致率是 {stab.get('agreement', 0):.1%}。"
-            "這些職缺的描述兩期完全沒變，所以不一致的部分純粹是方法的量測誤差 —— "
-            "下面任何變化要大過這個數字才值得解讀。")
-
-    hide_self = st.checkbox("隱藏存活的自環，只看下架與新進", value=True)
-    fl = df("/cluster-flow", from_snapshot=FRM, to_snapshot=TO,
-            min_n=5, include_self=not hide_self)
-    if fl.empty:
-        st.warning("這個區間沒有符合條件的流向。")
-    else:
-        fl["from_label"] = [
-            "【新進】" if f == -998 else (lb or f"未歸類/群{int(f)}")
-            for f, lb in zip(fl.from_cluster, fl.from_label, strict=False)]
-        fl["to_label"] = [
-            "【下架】" if t == -999 else (lb or f"未歸類/群{int(t)}")
-            for t, lb in zip(fl.to_cluster, fl.to_label, strict=False)]
-        top = fl.nlargest(40, "n")
-        srcs = [f"◀ {s}" for s in top.from_label]
-        dsts = [f"{d} ▶" for d in top.to_label]
-        nodes = list(dict.fromkeys(srcs + dsts))
-        nidx = {n: i for i, n in enumerate(nodes)}
-        fig = go.Figure(go.Sankey(
-            node={"label": nodes, "pad": 12, "thickness": 14},
-            link={"source": [nidx[s] for s in srcs], "target": [nidx[d] for d in dsts],
-                  "value": top.n.tolist(), "label": top.kind.tolist()}))
-        fig.update_layout(height=760, font_size=11)
-        st.plotly_chart(fig, use_container_width=True)
-        st.dataframe(fl.sort_values("n", ascending=False),
-                     use_container_width=True, hide_index=True, height=320)
-
-# ── 產業組成 ───────────────────────────────────────────────────────
-with tabs[3]:
-    st.caption(f"每個{DIM}的職缺分散到哪些語意群集，以及兩期之間這個分布怎麼重組。")
-    comp = df("/industry-composition", min_n=20, dimension=DIM)
-    if comp.empty:
-        st.warning("flow_industry_cluster 是空的。")
-    else:
-        comp["label"] = comp.label.fillna("未命名")
-        a = comp[comp.snapshot_date == FRM].pivot_table(
-            index="category", columns="label", values="share_in_category",
-            aggfunc="sum", fill_value=0)
-        b = comp[comp.snapshot_date == TO].pivot_table(
-            index="category", columns="label", values="share_in_category",
-            aggfunc="sum", fill_value=0)
-        idx = a.index.union(b.index)
-        col = a.columns.union(b.columns)
-        delta = (b.reindex(index=idx, columns=col).fillna(0)
-                 - a.reindex(index=idx, columns=col).fillna(0))
-        keep = delta.abs().max().nlargest(30).index
-        st.subheader(f"{DIM}內部組成的變化（百分點）")
-        fig = px.imshow(delta[keep] * 100, color_continuous_scale="RdBu",
-                        color_continuous_midpoint=0, aspect="auto",
-                        labels={"color": "百分點"})
-        fig.update_layout(height=700)
-        st.plotly_chart(fig, use_container_width=True)
-
-        snap = st.radio("Sankey 快照", SNAPS, horizontal=True, index=len(SNAPS) - 1)
-        s = comp[comp.snapshot_date == snap].nlargest(60, "n")
-        nodes = list(dict.fromkeys([f"◀ {x}" for x in s.category]
-                                   + [f"{x} ▶" for x in s.label]))
-        nidx = {n: i for i, n in enumerate(nodes)}
-        fig = go.Figure(go.Sankey(
-            node={"label": nodes, "pad": 12, "thickness": 14},
-            link={"source": [nidx[f"◀ {x}"] for x in s.category],
-                  "target": [nidx[f"{x} ▶"] for x in s.label],
-                  "value": s.n.tolist()}))
-        fig.update_layout(height=800, font_size=11)
-        st.plotly_chart(fig, use_container_width=True)
-
-# ── 公司招募位移 ───────────────────────────────────────────────────
+# ── 方法與限制 ─────────────────────────────────────────────────────
 with tabs[4]:
-    st.caption(
-        "同一家公司在兩期各自招募 ≥N 個職缺時，把它兩期的職缺向量各取平均當「招募重心」，"
-        "算兩個重心的 cosine。位移分數高＝這家公司想找的人明顯換了種類。")
-    mj = st.slider("兩期各自至少幾個職缺", 3, 20, 3)
-    cs = df("/company-shift", from_snapshot=FRM, to_snapshot=TO, limit=300, min_jobs=mj)
-    if cs.empty:
-        st.warning("沒有符合條件的公司。把門檻調低試試。")
-    else:
-        st.metric("符合條件的公司數", len(cs))
-        fig = px.histogram(cs, x="shift_score", nbins=40,
-                           labels={"shift_score": "位移分數 (1 − cosine)"})
-        fig.update_layout(height=300)
-        st.plotly_chart(fig, use_container_width=True)
-        st.dataframe(
-            cs[["company_name", "industry_class", "bucket_label", "n_from", "n_to",
-                "shift_score", "from_label", "to_label"]],
-            use_container_width=True, hide_index=True, height=520,
-            column_config={"shift_score": st.column_config.ProgressColumn(
-                "位移分數", min_value=0.0, max_value=float(cs.shift_score.max()),
-                format="%.3f")})
+    st.subheader("方法")
+    st.markdown("""
+職缺結構以非監督方式建立：描述文字經 bge-m3 編碼為 1024 維向量，
+PCA 降至 50 維後以 UMAP 投影，再由 HDBSCAN 分群。群集數量未事先指定，
+標籤取自最接近群集中心的實際職稱。
 
-# ── 相似職缺 ───────────────────────────────────────────────────────
-with tabs[5]:
-    st.caption("直接用 bge-m3 向量做最近鄰。把目標快照切到前一期，"
-               "就是在問「這個職缺在前一期對應到什麼」。")
-    jid = st.text_input("job_id", placeholder="例如 85186395")
-    target = st.radio("在哪一期找", SNAPS[::-1], horizontal=True)
-    if jid.strip():
-        try:
-            res = get(f"/similar/{jid.strip()}", snapshot=target, k=15)
-            st.write(f"來源快照 `{res['source']['snapshot_date']}` → "
-                     f"目標快照 `{res['target_snapshot']}`")
-            st.dataframe(pd.DataFrame(res["results"]), use_container_width=True,
-                         hide_index=True)
-        except Exception as exc:
-            st.error(f"查詢失敗：{exc}")
+技能偵測採用關鍵字樣式比對，樣式經誤判檢查後定版。
+""")
+
+    st.subheader("被否決的方案：向量錨點分類")
+    st.markdown("""
+原設計為每個技能概念撰寫描述工作內容的錨句，編碼後與職缺向量計算餘弦相似度，
+以相似度認定技能。在全量資料上測量後否決，指標如下：
+""")
+    sep = cs[["concept", "anchor_sim_median", "anchor_sim_p99_all", "separation_sigma"]]
+    st.dataframe(sep, use_container_width=True, hide_index=True,
+                 column_config={
+                     "concept": "概念",
+                     "anchor_sim_median": st.column_config.NumberColumn(
+                         "正例相似度中位", format="%.3f"),
+                     "anchor_sim_p99_all": st.column_config.NumberColumn(
+                         "全體相似度 P99", format="%.3f"),
+                     "separation_sigma": st.column_config.NumberColumn(
+                         "分離度 (σ)", format="%.2f"),
+                 })
+    st.markdown("""
+多數概念的全體 P99 高於正例中位數，代表無關職缺的高分尾端與真正例重疊；
+取相似度前 500 名僅召回兩成正例。原因為職缺描述中位數僅 128 字，
+且含大量「工作內容」「福利」等模板語，單一技能詞在整段語意中的比重過低。
+
+向量因此僅用於其有效之處：非監督分群、相似職缺檢索，以及待驗證候選的排序。
+""")
+
+    st.subheader("限制")
+    st.markdown(f"""
+- 單一時間點（{SNAP}），描述當期結構，不構成趨勢。
+- 來源為單一商業求職平台，雇主組成有其特性，不代表整體勞動市場。
+- 採集時每個職務類別設有 4,500 筆上限，熱門類別的絕對數為截斷值，佔比較絕對數可靠。
+- 群集邊界由語意模型與分群參數決定，非官方職業分類。
+- 技能偵測依賴雇主是否於描述中寫出該技能，未寫出者無法偵測。
+- 薪資統計僅涵蓋可換算為月薪者。
+""")
