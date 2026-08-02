@@ -114,7 +114,11 @@ class Crawler:
                       f"（連續 {self.blocked}/{S.CRAWL_ABORT_AFTER_403}）")
                 if self.blocked >= S.CRAWL_ABORT_AFTER_403:
                     raise Blocked(f"連續 {self.blocked} 次 HTTP {resp.status_code}")
-                time.sleep(30)          # 被擋就退遠一點再試
+                # 指數退避：30 → 60 → 120…。原版根本沒有 403 分支，403 會掉進
+                # 「非 200」的路徑用 2 秒間隔猛重試 —— 它沒出事只是因為從沒觸發過。
+                back = 30 * (2 ** (self.blocked - 1))
+                print(f"    等 {back} 秒再試")
+                time.sleep(back)
                 continue
 
             if resp.status_code != 200:
@@ -192,6 +196,9 @@ class Crawler:
 
             result = self.fetch(codes, page)
             if result is None:
+                # 失敗也要等。原版這裡是直接 continue，等於「對方剛出錯，我們馬上
+                # 再打一次」—— 正是最不該加壓的時候。
+                time.sleep(random.uniform(S.SLEEP_PAGE_MIN, S.SLEEP_PAGE_MAX))
                 continue
 
             hits = result.get("hits") or []
@@ -240,6 +247,11 @@ class Crawler:
                 print("  本輪無新增，資料已耗盡，不再重跑")
                 return
             if self.per_bucket.get(bucket, 0) >= S.TARGET_PER_CATEGORY:
+                return
+            # 頁級續跑會讓「所有頁都抓過」的第二輪變成空轉，只是白等 45–90 秒。
+            # 真的還有沒抓過的頁才值得再跑一輪。
+            if all(f"{bucket}|{p}" in self.done for p in range(1, S.MAX_PAGES + 1)):
+                print("  這個類別的頁都抓過了，不再重跑")
                 return
             if run < S.MAX_RUNS_PER_CATEGORY:
                 # 第二層節流：輪與輪之間

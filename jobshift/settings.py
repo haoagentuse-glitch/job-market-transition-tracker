@@ -45,7 +45,9 @@ def vec_ids(snapshot: str) -> Path:
 
 # ── 1111 API ───────────────────────────────────────────────────────
 # 參數與舊快照「一字不改」，否則兩期不可比。
-BASE_URL = "https://www.1111.com.tw/api/v1/search/jobs/"
+# 可覆寫是為了能對著本機模擬伺服器量測節流行為 —— 驗證爬蟲的間隔對不對，
+# 不該拿對方的站台當測試靶。
+BASE_URL = os.getenv("JOBSHIFT_BASE_URL") or "https://www.1111.com.tw/api/v1/search/jobs/"
 FETCH_PARAMS_BASE = {
     "sortBy": "da",
     "sortOrder": "desc",
