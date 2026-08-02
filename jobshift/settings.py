@@ -67,8 +67,10 @@ TARGET_PER_CATEGORY = 4500
 # 實測反例（2026-08-02）：Scrapy 併發 4 ＋ 1 秒延遲，約 70 個請求後整站封鎖 IP，
 # 連首頁 HTML 都回 403；降到序列 ＋ 3 秒連續請求，14 個請求後仍被擋。
 # 這三組數字不要調小。
-SLEEP_PAGE_MIN = float(os.getenv("CRAWL_SLEEP_PAGE_MIN", "2.2"))       # 每頁之間
-SLEEP_PAGE_MAX = float(os.getenv("CRAWL_SLEEP_PAGE_MAX", "3.0"))
+# 每頁之間。前一版是 2.2–3.0 秒，2026-08-02 起放寬到 3–5 秒：那天在 2.2–3.0
+# 之下續抓仍然立刻被擋，代表對方的門檻已經比前一版執行時嚴，照抄舊值不夠。
+SLEEP_PAGE_MIN = float(os.getenv("CRAWL_SLEEP_PAGE_MIN", "3.0"))
+SLEEP_PAGE_MAX = float(os.getenv("CRAWL_SLEEP_PAGE_MAX", "5.0"))
 SLEEP_RUN_MIN = float(os.getenv("CRAWL_SLEEP_RUN_MIN", "45"))          # 每輪之間
 SLEEP_RUN_MAX = float(os.getenv("CRAWL_SLEEP_RUN_MAX", "90"))
 SLEEP_CATEGORY_MIN = float(os.getenv("CRAWL_SLEEP_CAT_MIN", "120"))    # 每類別之間
