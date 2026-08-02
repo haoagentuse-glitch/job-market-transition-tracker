@@ -1,0 +1,7 @@
+data/
+*.duckdb
+*.npy
+*.parquet
+*.jsonl
+__pycache__/
+.venv/

@@ -1,0 +1,76 @@
+x-base: &base
+  build: .
+  image: jobshift:latest
+  volumes:
+    - ./data:/data
+    - ./jobshift:/app/jobshift          # 改程式不用重 build
+  environment:
+    JOBSHIFT_DATA_DIR: /data
+    TZ: Asia/Taipei
+  working_dir: /app
+
+x-gpu: &gpu
+  deploy:
+    resources:
+      reservations:
+        devices:
+          - driver: nvidia
+            count: 1
+            capabilities: [gpu]
+
+services:
+  # ── 批次階段：用 `docker compose run --rm <service>` 手動觸發 ──────────
+
+  crawl:                     # 長任務 ①：爬取現在這個時刻的快照
+    <<: *base
+    profiles: ["batch"]
+    environment:
+      JOBSHIFT_DATA_DIR: /data
+      CRAWL_CONCURRENCY: "${CRAWL_CONCURRENCY:-4}"
+      CRAWL_DELAY: "${CRAWL_DELAY:-1.0}"
+      CRAWL_MAX_PAGES: "${CRAWL_MAX_PAGES:-150}"
+    command: python -m jobshift.spider
+
+  ingest:                    # 短任務：原始資料 → 清洗 → DuckDB
+    <<: *base
+    profiles: ["batch"]
+    command: python -m jobshift.ingest --all
+
+  embed:                     # 長任務 ②：bge-m3 向量化（GPU）
+    <<: [*base, *gpu]
+    profiles: ["batch"]
+    command: python -m jobshift.embed --all
+
+  analyze:                   # 中任務：分群 → 跨期指派 → 遷移 → DuckDB
+    <<: *base
+    profiles: ["batch"]
+    command: python -m jobshift.analyze
+
+  # ── 常駐服務：docker compose up -d ────────────────────────────────
+
+  api:
+    <<: *base
+    command: uvicorn jobshift.api:app --host 0.0.0.0 --port 8000
+    ports:
+      - "8000:8000"
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8000/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+
+  dashboard:
+    <<: *base
+    environment:
+      JOBSHIFT_DATA_DIR: /data
+      JOBSHIFT_API: http://api:8000
+    command: >
+      streamlit run jobshift/dashboard.py
+      --server.port=8501 --server.address=0.0.0.0
+      --server.headless=true --browser.gatherUsageStats=false
+    ports:
+      - "8501:8501"
+    depends_on:
+      api:
+        condition: service_healthy
