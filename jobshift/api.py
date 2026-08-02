@@ -12,7 +12,7 @@ import numpy as np
 import pandas as pd
 from fastapi import FastAPI, HTTPException, Query
 
-from jobshift import db
+from jobshift import db, taxonomy
 from jobshift import settings as S
 
 app = FastAPI(
@@ -87,7 +87,7 @@ def timeline():
     """)
 
 
-DIMENSIONS = {"職務類別": "bucket_label", "行業大類": "industry_class"}
+DIMENSIONS = taxonomy.DIMENSIONS      # 單一來源在 taxonomy.py
 
 
 @app.get("/dimensions")

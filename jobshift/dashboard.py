@@ -12,7 +12,11 @@ import streamlit as st
 
 API = os.getenv("JOBSHIFT_API", "http://localhost:8000")
 
-st.set_page_config(page_title="職缺結構遷移", page_icon="📊", layout="wide")
+# initial_sidebar_state 一定要寫死 expanded：比較區間與分類維度這兩個主要控制項
+# 都在側邊欄，預設的 auto 在較窄視窗會把它收起來（而且是整個從 DOM 卸載），
+# 使用者一打開會以為沒有這些選項。
+st.set_page_config(page_title="職缺結構遷移", page_icon="📊", layout="wide",
+                   initial_sidebar_state="expanded")
 
 
 @st.cache_data(ttl=300)

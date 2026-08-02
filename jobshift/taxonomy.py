@@ -39,6 +39,13 @@ BUCKET_LABELS: dict[str, str] = {
 
 UNKNOWN_CLASS = "未分類"
 
+# 分析與儀表板可切換的兩個維度：顯示名稱 → jobs 表的欄位名。
+# 同一個結論在兩套維度下都成立，才比較可信 —— 最便宜的一種穩健性檢查。
+DIMENSIONS: dict[str, str] = {
+    "行業大類": "industry_class",
+    "職務類別": "bucket_label",
+}
+
 # ── 行業大類：industry_name → A–S 大類 ─────────────────────────────────
 # 注意：子類名稱裡的分隔符是全形斜線 U+2571「╱」，不是半形 "/"。改動時務必照抄。
 INDUSTRY_CLASSIFICATION: dict[str, list[str]] = {

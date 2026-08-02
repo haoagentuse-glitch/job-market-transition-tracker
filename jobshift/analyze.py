@@ -32,14 +32,15 @@ from sklearn.decomposition import PCA
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.metrics import silhouette_score
 
-from jobshift import db
+from jobshift import db, taxonomy
 from jobshift import settings as S
 
 GONE, ADDED = -999, -998   # 遷移矩陣的兩個虛擬端點：下架、新進
 
-# 兩套分類維度。定義與差異見 taxonomy.py —— 職務桶是爬蟲代碼決定的（不精準但可比舊快照），
-# 行業大類是公司行業名查表來的（乾淨）。所有依分類切分的統計都對兩者各算一次。
-DIMENSIONS = {"職務類別": "bucket_label", "行業大類": "industry_class"}
+# 兩套分類維度的定義在 taxonomy.py（單一來源）。職務桶是爬蟲代碼決定的
+# （不精準但可比舊快照），行業大類是公司行業名查表來的（乾淨）。
+# 所有依分類切分的統計都對兩者各算一次。
+DIMENSIONS = taxonomy.DIMENSIONS
 
 
 # ── 載入 ───────────────────────────────────────────────────────────
