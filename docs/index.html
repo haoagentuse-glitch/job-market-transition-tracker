@@ -1,0 +1,135 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>台灣職缺語意結構分析</title>
+<meta name="description" content="以語意向量分析台灣職缺市場結構：64,643 筆職缺、98 個非監督語意群集、數位與 AI 技能分布">
+<link rel="stylesheet" href="style.css">
+<script src="https://cdn.plot.ly/plotly-2.35.2.min.js" charset="utf-8"></script>
+</head>
+<body>
+
+<aside id="sidebar">
+  <h3>資料</h3>
+  <div class="kv"><span>快照</span><span id="s-snap">—</span></div>
+  <div class="kv"><span>職缺</span><span id="s-n">—</span></div>
+  <div class="kv"><span>來源</span><span>1111 人力銀行</span></div>
+  <hr>
+  <h3>方法</h3>
+  <div class="kv"><span>嵌入</span><span>bge-m3 · 1024 維</span></div>
+  <div class="kv"><span>分群</span><span id="s-method">—</span></div>
+  <div class="kv"><span>群集</span><span id="s-clusters">—</span></div>
+  <div class="kv"><span>噪點</span><span id="s-noise">—</span></div>
+  <hr>
+  <div class="radio-label">分類維度</div>
+  <div id="dim-radios"></div>
+  <hr>
+  <div class="kv"><span style="min-width:0">
+    <a href="https://github.com/haoagentuse-glitch/taiwan-job-market-semantics">原始碼與方法說明</a>
+  </span></div>
+</aside>
+
+<main>
+  <h1>台灣職缺的語意結構</h1>
+  <div class="caption" id="subtitle">載入中…</div>
+
+  <div class="tabs" id="tabs"></div>
+  <div id="loading">載入資料中…</div>
+
+  <!-- 市場全景 -->
+  <section class="panel" data-tab="市場全景">
+    <div class="metrics">
+      <div class="metric"><div class="label">語意群集</div><div class="value" id="m-clusters">—</div></div>
+      <div class="metric"><div class="label">最大群集佔比</div><div class="value" id="m-top1">—</div></div>
+      <div class="metric"><div class="label">前十群集合計</div><div class="value" id="m-top10">—</div></div>
+    </div>
+    <div class="chart" id="c-clusters"></div>
+    <div class="table-wrap" style="max-height:420px"><table id="t-clusters"></table></div>
+    <div class="field-label">檢視群集內職缺</div>
+    <select id="sel-cluster"></select>
+    <div class="table-wrap"><table id="t-cluster-jobs"></table></div>
+  </section>
+
+  <!-- 數位職缺 -->
+  <section class="panel" data-tab="數位職缺">
+    <div class="metrics">
+      <div class="metric"><div class="label">數位技能職缺</div><div class="value" id="m-digital">—</div></div>
+      <div class="metric"><div class="label">佔全體</div><div class="value" id="m-digital-share">—</div></div>
+    </div>
+    <div class="table-wrap"><table id="t-concepts"></table></div>
+    <h3 id="h-cross">技能概念在分類中的分布</h3>
+    <div class="chart" id="c-heatmap"></div>
+    <div class="note">數值為該類別中具備此技能的職缺比例。技能不受職務分類限制，同一概念會橫跨多個類別。</div>
+    <div class="field-label">概念集中於哪些類別</div>
+    <select id="sel-concept-cross"></select>
+    <div class="chart" id="c-concept-cat"></div>
+  </section>
+
+  <!-- AI 技能 -->
+  <section class="panel" data-tab="AI 技能">
+    <div class="metrics">
+      <div class="metric"><div class="label">AI 技能職缺</div><div class="value" id="m-ai">—</div></div>
+      <div class="metric"><div class="label">佔全體</div><div class="value" id="m-ai-share">—</div></div>
+      <div class="metric"><div class="label">月薪相對全體</div><div class="value" id="m-ai-prem">—</div></div>
+    </div>
+    <div class="table-wrap"><table id="t-ai"></table></div>
+    <h3 id="h-ai-dist">AI 技能職缺的分布</h3>
+    <div class="chart" id="c-ai-dist"></div>
+    <div class="field-label">檢視職缺</div>
+    <select id="sel-ai-concept"></select>
+    <div class="pill-group" id="ai-view">
+      <button class="pill active" data-v="hit">已認定</button>
+      <button class="pill" data-v="cand">待驗證候選</button>
+    </div>
+    <div class="note" id="cand-note" style="display:none">
+      關鍵字未命中、但語意錨點相似度最高者。錨點相似度的精確率不足以直接採信，
+      此處僅供人工檢視，不計入任何統計。
+    </div>
+    <div class="table-wrap"><table id="t-ai-jobs"></table></div>
+  </section>
+
+  <!-- 薪資 -->
+  <section class="panel" data-tab="薪資">
+    <div class="metrics">
+      <div class="metric"><div class="label">全體月薪中位</div><div class="value" id="m-sal">—</div></div>
+      <div class="metric"><div class="label">可換算月薪比例</div><div class="value" id="m-sal-cov">—</div></div>
+    </div>
+    <div class="caption">面議與論件計酬無可比數字，不計入薪資統計。</div>
+    <div class="chart" id="c-salary"></div>
+    <div class="note">誤差線為四分位距。虛線為全體中位數。</div>
+    <div class="table-wrap"><table id="t-salary"></table></div>
+  </section>
+
+  <!-- 方法與限制 -->
+  <section class="panel" data-tab="方法與限制">
+    <div class="prose">
+      <h3>方法</h3>
+      <p>職缺結構以非監督方式建立：描述文字經 bge-m3 編碼為 1024 維向量，
+      PCA 降至 50 維後以 UMAP 投影，再由 HDBSCAN 分群。群集數量未事先指定，
+      名稱取自群內出現次數最多的職稱，並清除招募話術。</p>
+      <p>技能偵測採用關鍵字樣式比對，樣式經誤判檢查後定版。</p>
+
+      <h3>被否決的方案：向量錨點分類</h3>
+      <p>原設計為每個技能概念撰寫描述工作內容的錨句，編碼後與職缺向量計算餘弦相似度，
+      以相似度認定技能。在全量資料上測量後否決，指標如下：</p>
+      <div class="table-wrap"><table id="t-sep"></table></div>
+      <p>多數概念的全體 P99 高於正例中位數，代表無關職缺的高分尾端與真正例重疊；
+      取相似度前 500 名僅召回兩成正例。原因為職缺描述中位數僅 128 字，
+      且含大量「工作內容」「福利」等模板語，單一技能詞在整段語意中的比重過低。</p>
+      <p>向量因此僅用於其有效之處：非監督分群、相似職缺檢索，以及待驗證候選的排序。</p>
+
+      <h3>關鍵字樣式的誤判處理</h3>
+      <p>字串比對命中的是字面。實測中，飯店職缺描述的 <code>provide prompt service</code>
+      會被 <code>Prompt</code> 命中，導致 23 筆餐旅職缺被歸入生成式 AI。
+      修正樣式後該概念由 392 筆降為 255 筆。裸詞 <code>AI</code>、<code>Prompt</code> 一律不使用。</p>
+
+      <h3>限制</h3>
+      <ul id="limits"></ul>
+    </div>
+  </section>
+</main>
+
+<script src="app.js"></script>
+</body>
+</html>

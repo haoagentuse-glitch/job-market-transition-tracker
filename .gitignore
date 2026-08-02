@@ -1,4 +1,6 @@
-data/
+# 前面加斜線才只匹配根目錄。寫成 data/ 會連 docs/data/ 一起排除，
+# 而那是靜態展示頁要進版控的資料。
+/data/
 *.duckdb
 *.npy
 *.parquet

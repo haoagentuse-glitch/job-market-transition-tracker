@@ -6,6 +6,11 @@
 
 分析對象為 2026-05-19 採集的 **64,643 筆**職缺。
 
+**線上展示：<https://haoagentuse-glitch.github.io/taiwan-job-market-semantics/>**
+
+展示頁為靜態版本，所有視圖已預先算成 JSON（1.5 MB），不依賴後端服務。
+完整版包含 FastAPI 查詢介面與 Streamlit 儀表板，程式碼在本倉庫中，於本機執行。
+
 ---
 
 ## 主要結果
@@ -128,6 +133,15 @@ docker compose up -d api dashboard
 
 儀表板 <http://localhost:8501>，API 文件 <http://localhost:8010/docs>。
 
+### 產生靜態展示頁
+
+```bash
+docker compose run --rm --no-deps -v "$PWD/docs:/app/docs" ingest python -m jobshift.export_static
+```
+
+匯出 `docs/data/` 下的 JSON，由 GitHub Pages 提供。匯出腳本直接呼叫 `api` 模組的函式，
+與線上版走同一套查詢邏輯，不另寫一份 SQL，避免兩版數字不一致。
+
 RTX 4060 上，64,643 筆向量化約 8 分鐘，分群約 15 分鐘。分群結果會快取，重跑分析時沿用既有群集定義，需重建時加 `--refit`。
 
 ### 開發
@@ -152,7 +166,9 @@ jobshift/
   taxonomy.py    行業與職務分類對照
   api.py         FastAPI 查詢介面
   dashboard.py   Streamlit 儀表板
+  export_static.py  匯出靜態展示頁所需的 JSON
   db.py          DuckDB 連線
+docs/            GitHub Pages 靜態展示頁
 ```
 
 ---
