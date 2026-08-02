@@ -8,7 +8,7 @@
 
 **線上展示：<https://haoagentuse-glitch.github.io/taiwan-job-market-semantics/>**
 
-展示頁為靜態版本，所有視圖已預先算成 JSON（1.5 MB），不依賴後端服務。
+展示頁為靜態版本，不依賴後端服務。
 完整版包含 FastAPI 查詢介面與 Streamlit 儀表板，程式碼在本倉庫中，於本機執行。
 
 ---

@@ -18,6 +18,16 @@ const LAYOUT = {
 const CONFIG = { displayModeBar: false, responsive: true };
 const RED = "#ff4b4b";
 
+// 低彩度的藍灰漸層，取代 Plotly 內建的 Blues（那組彩度偏高，
+// 在大量接近零的格子上會顯得跳）。搭配 reversescale 使用。
+const HEATMAP_SCALE = [
+  [0, "#3d4d5c"],
+  [0.25, "#66788a"],
+  [0.5, "#95a3b1"],
+  [0.75, "#c3ccd5"],
+  [1, "#eef0f3"],
+];
+
 const num = (v, d = 0) =>
   v === null || v === undefined || Number.isNaN(v)
     ? "—"
@@ -159,7 +169,8 @@ function renderCrossHeatmap() {
 
   Plotly.newPlot("c-heatmap", [{
     type: "heatmap", x: cons, y: cats, z,
-    colorscale: "Blues", colorbar: { title: "%", thickness: 12 },
+    colorscale: HEATMAP_SCALE, reversescale: true,
+    colorbar: { title: "%", thickness: 12 },
     hovertemplate: "%{y}<br>%{x}<br>%{z:.2f}%<extra></extra>",
   }], { ...LAYOUT, height: 520, margin: { l: 0, r: 0, t: 10, b: 90 },
         xaxis: { ...LAYOUT.xaxis, tickangle: -30, automargin: true } }, CONFIG);
