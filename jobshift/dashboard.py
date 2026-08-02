@@ -55,7 +55,9 @@ with tabs[0]:
     for i, row in totals.iterrows():
         c[i].metric(f"{row.snapshot_date} 職缺數", f"{int(row.n):,}")
         c[i + 2].metric(f"{row.snapshot_date} 月薪中位數",
-                        f"{int(row.median_salary):,}" if pd.notna(row.median_salary) else "—")
+                        f"{int(row.median_salary):,}" if pd.notna(row.median_salary) else "—",
+                        help="只涵蓋能換算成月薪的職缺。面議（約 14%）與論件計酬（約 2%）"
+                             "沒有可比的數字，不計入。")
 
     surv = df("/survival")
     if not surv.empty:

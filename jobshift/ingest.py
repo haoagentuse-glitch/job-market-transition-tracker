@@ -133,7 +133,8 @@ def clean(df: pd.DataFrame, snapshot: str) -> pd.DataFrame:
     df["description_len"] = df["description"].str.len()
 
     # ③ 硬缺陷過濾：只擋「結構上不可用」的，不做任何語意／關鍵字判斷
-    bad_title = df["job_title"].str.fullmatch(r"(?i)\s*(測試|test|測試職缺)?\s*", na=True)
+    bad_title = (df["job_title"].str.fullmatch(r"(?i)\s*(測試|test|測試職缺)?\s*", na=True)
+                 .fillna(True).astype(bool))          # NA 混進布林遮罩會讓索引直接拋錯
     too_short = df["description_len"] < 10
     df = df[~(bad_title | too_short)].copy()
     n_dropped = n0 - n_dedup - len(df)
